@@ -678,29 +678,34 @@ if __name__ == "__main__":
 
 
 
-# AGFL Results:                                                                                  
-#   Accuracy : 0.7438                                                                            
-#   F1 (Macro): 0.7433                                                                           
-#   ROC-AUC (OVR): 0.8407                                                                        
-                                                                                               
-                                                                                               
-# Standard Results:                                                                              
-#   Accuracy : 0.7307                                                                            
-#   F1 (Macro): 0.7291                                                                           
-#   ROC-AUC (OVR): 0.8276                                                                        
-                                                                                                                  
-                                                                                               
-# None Results:                                                                                  
-#   Accuracy : 0.7253                                                                            
-#   F1 (Macro): 0.7229                                                                           
-#   ROC-AUC (OVR): 0.8265 
+# Initializing EEG task...
+# Device: cuda | Model: EEGEncoder | AGFL: on
+# Starting EEG Runner...
+# --- Training Eegencoder (AGFL) ---
+# Class counts: [507 529]
+# Applied weights: [1.02169625 0.97920605]
+# Training Model: 100%|█| 100/100 [01:02<00:00,  1.61epoch/s, Loss=0.0634, Val Acc=0.7192, LR=0.0
+# Final Results -> Accuracy: 0.7192 | F1 (Macro): 0.7157 | ROC-AUC: 0.8314
 
+# Eegencoder (AGFL) Results:
+#   Accuracy : 0.7192
+#   F1 (Macro): 0.7157
+#   ROC-AUC (OVR): 0.8314
 
+# Plotting power spectral density (dB=True).
+# ((.venv) ) [georgii.promyslov@gn12 ~]$ PYTHONPATH=. python3 agfl/main.py --task eeg --model EEGNet --agfl on
+# Initializing EEG task...
+# Device: cuda | Model: EEGNet | AGFL: on
+# Starting EEG Runner...
+# --- Training Eegnet (AGFL) ---
+# Class counts: [507 529]
+# Applied weights: [1.02169625 0.97920605]
+# Training Model: 100%|█| 100/100 [01:00<00:00,  1.66epoch/s, Loss=0.0634, Val Acc=0.7192, LR=0.0
+# Final Results -> Accuracy: 0.7192 | F1 (Macro): 0.7157 | ROC-AUC: 0.8316
 
-#2 seconds epoch
-#topographic / topomat - need power of one channel for the epoch - and I need channel locations - spectum map
+# Eegnet (AGFL) Results:
+#   Accuracy : 0.7192
+#   F1 (Macro): 0.7157
+#   ROC-AUC (OVR): 0.8316
 
-
-
-#explain temporall attention heatmaps
-#attention between different channels
+# Plotting power spectral density (dB=True).

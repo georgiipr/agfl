@@ -122,7 +122,7 @@ class EEGEncoder(nn.Module):
         else:
             self.attn_blocks = None
 
-        self.attn_blocks = None
+        #self.attn_blocks = None
 
         self.aa_drop = nn.Dropout(0.3)
         
