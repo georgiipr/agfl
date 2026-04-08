@@ -27,3 +27,7 @@ Trainers contain the training files for both ecg and eeg
 Plots contains various plotting functions
 Main handles imports and execution
 
+Note: eeg uses BCI2a IV Competition dataset (.gdf)
+Zip can be downloaded from this link: https://www.bbci.de/competition/iv/download/index.html?agree=yes&submit=Submit
+To ensure it works, put uploaded files into the ml folder in the same directory where this project is located
+
