@@ -1,33 +1,40 @@
-To run for ecg:
+To run the code:
 ```
-PYTHONPATH=. python3 main.py --task ecg
+PYTHONPATH=. python3 agfl/main.py --task <task_name> --model <model_name> --agfl <state>
 ```
+task_name:
+1. eeg
+2. ecg
 
-To run for eeg:
-```
-PYTHONPATH=. python3 main.py --task eeg
-```
+model_name:
+1. conformer
+2. eegnet
+3. eegencoder
+4. dstseegencoder
 
-Current ecg model is conformer, curent eeg model is EEGNet with the support of EEGEncoder
+note: conformer currently for ecg, other models for eeg only
+
+state:
+1. on
+2. off
+
+note: state off means standard MultiHeaded attention is being used
 
 ToDo:
-1. Make an option to choose the model and agfl on / off as a key (PYTHONPATH=. python3 main.py --task eeg --model eegnet --agfl on)
-2. Remove none attention: off agfl from 1 meand that the standard attention is being used
-3. Add Pipeline for BCI Password
-4. Do plots for eeg: CSP and STFT (C3 & C4 channels) / first do more advanced data denoising
-5. dsts model was added - needs pipeline integration
-6. More models needed after step 1 is specified
+1. Advanced data denoising for eeg
+2. Add Pipeline for BCI Password
+3. Add more models for eeg
 
-
-Project structure: attention5.py is full ecg pipeline (depricated), attention6.py is full eeg pipeline (depricated)
-
-Data_loaders handle datasets
-Models contain various models, with custom options to either include or exclude agfl_layer (custom attention) and standard MH attention
-Trainers contain the training files for both ecg and eeg
-Plots contains various plotting functions
-Main handles imports and execution
+-Data_loaders handle datasets
+-Models contain various models, with custom options to either include or exclude agfl_layer (custom attention) and standard MH attention
+-Trainers contain the training files for both ecg and eeg
+-Plots contain various plotting functions
+-keys handles the exectuion of various launch setups
+-Main handles general main
 
 Note: eeg uses BCI2a IV Competition dataset (.gdf)
 Zip can be downloaded from this link: https://www.bbci.de/competition/iv/download/index.html?agree=yes&submit=Submit
+
 To ensure it works, put uploaded files into the ml folder in the same directory where this project is located
+ecg uses arrithmiya dataset. ask the owner for the folder.
 
