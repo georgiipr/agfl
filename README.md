@@ -31,6 +31,7 @@ ToDo:
 1. Advanced data denoising for eeg
 2. Add Pipeline for BCI Password
 3. Add more models for eeg
+4. Accuracy of encoders is horrible
 
 -Data_loaders handle datasets
 -Models contain various models, with custom options to either include or exclude agfl_layer (custom attention) and standard MH attention
