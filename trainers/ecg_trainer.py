@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import tqdm
+import copy
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
@@ -59,6 +60,9 @@ def train_eval_ecg(model, train_loader, val_loader, device, epochs=50):
     pbar = tqdm.trange(epochs, desc="Training Model", unit="epoch")
     history = {'loss': [], 'val_acc': [], 'lr': []}
     
+    best_acc = 0.0
+    best_model_wts = copy.deepcopy(model.state_dict())
+    
     for epoch in pbar:
         model.train()
         epoch_loss = 0.0
@@ -88,6 +92,10 @@ def train_eval_ecg(model, train_loader, val_loader, device, epochs=50):
                 
         current_acc = accuracy_score(val_targets, val_preds)
         
+        if current_acc > best_acc:
+            best_acc = current_acc
+            best_model_wts = copy.deepcopy(model.state_dict())
+        
         history['loss'].append(avg_loss)
         history['val_acc'].append(current_acc)
         history['lr'].append(opt.param_groups[0]['lr'])
@@ -95,10 +103,13 @@ def train_eval_ecg(model, train_loader, val_loader, device, epochs=50):
         pbar.set_postfix({
             "Loss": f"{avg_loss:.4f}", 
             "Val_Acc": f"{current_acc:.4f}",
+            "Best_Acc": f"{best_acc:.4f}",
             "LR": f"{opt.param_groups[0]['lr']:.2e}"
         })
 
+    model.load_state_dict(best_model_wts)
     model.eval()
+    
     preds, targets, probs = [], [], []
 
     with torch.no_grad():

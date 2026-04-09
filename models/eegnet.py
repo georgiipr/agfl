@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from agfl_layer import AGFL
-from standard_none_attention import StandardAttention, NoAttention
+from standard_attention import StandardAttention
 
 class EEGNet(nn.Module):
     def __init__(self, num_channels=22, num_classes=2, samples=1000, 

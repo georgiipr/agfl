@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 from agfl_layer import AGFL
-from standard_none_attention import StandardAttention, NoAttention
+from standard_attention import StandardAttention
 
 class Conv1dL2(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=False):

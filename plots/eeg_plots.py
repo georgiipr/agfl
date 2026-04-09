@@ -6,6 +6,8 @@ import umap
 from sklearn.metrics import accuracy_score
 import mne
 import os
+import scipy.signal as signal
+
 
 def get_mne_info(ch_names, fs=250.0):
     info = mne.create_info(ch_names=ch_names, sfreq=fs, ch_types='eeg')
@@ -85,7 +87,7 @@ def plot_layer_heatmaps_u(models, x, save_path, save_prefix="heatmap"):
             _ = model(x)
 
         num_layers = len(model.attn_blocks)
-        fig, axes = plt.subplots(1, num_layers, figsize=(5*num_layers, 4))
+        fig, axes = plt.subplots(1, num_layers, figsize=(4*num_layers, 4))
         if num_layers == 1:
             axes = [axes]
 
@@ -105,7 +107,7 @@ def plot_layer_heatmaps_u(models, x, save_path, save_prefix="heatmap"):
                     A = A.mean(0).cpu().numpy()
 
             if A is not None and A.ndim == 2:
-                im = axes[i].imshow(A, aspect='auto', cmap='magma') 
+                im = axes[i].imshow(A, aspect='auto', cmap='viridis') 
                 axes[i].set_title(f"Window / Block {i}")
                 axes[i].set_xlabel("Time Step (Pooled)")
                 axes[i].set_ylabel("Time Step (Pooled)")
@@ -145,18 +147,14 @@ def plot_eeg_spatial_attention(x, models, save_path, save_prefix="temporal_atten
                     A = A.mean(0).cpu().numpy()
 
             if A is not None and A.ndim == 2:
-                fig, ax1 = plt.subplots(figsize=(8, 6))
+                fig, ax1 = plt.subplots(figsize=(6, 5))
                 
-                im = ax1.imshow(A, aspect='equal', cmap='plasma', alpha=0.9)
-                
-                seq_len = A.shape[0]
-                ax1.set_xticks(np.arange(seq_len))
-                ax1.set_yticks(np.arange(seq_len))
+                im = ax1.imshow(A, aspect='auto', cmap='viridis')
                 
                 ax1.set_xlabel("Target Time Step", fontsize=11)
                 ax1.set_ylabel("Source Time Step", fontsize=11)
                 
-                cbar = fig.colorbar(im, ax=ax1, fraction=0.046, pad=0.04)
+                cbar = fig.colorbar(im, ax=ax1)
                 cbar.set_label("Attention Weight", rotation=270, labelpad=15)
                 
                 plt.title(f"{name} - Block {i} Temporal Attention", fontsize=13, fontweight='bold')
@@ -203,4 +201,81 @@ def plot_eeg_epoch(x, save_path, y=None, fs=250.0, channel_names=None):
     
     plt.tight_layout()
     plt.savefig(f"{save_path}/epochs.png", dpi=300)
+    plt.close(fig)
+
+
+def plot_csp_patterns(X, y, ch_names, save_path, fs=250.0):
+    info = get_mne_info(ch_names, fs)
+    epochs = mne.EpochsArray(X, info, verbose=False)
+    
+    csp = mne.decoding.CSP(n_components=4, reg=None, log=True, norm_trace=False)
+    
+    try:
+        csp.fit(epochs.get_data(copy=False), y)
+        fig = csp.plot_patterns(epochs.info, ch_type='eeg', show=False, size=1.5)
+        fig.suptitle('Common Spatial Patterns (Left vs Right Hand)', fontsize=14, y=1.05)
+        
+        fig.savefig(os.path.join(save_path, "csp_patterns.png"), dpi=300, bbox_inches='tight')
+        plt.close(fig)
+    except ValueError as e:
+        print(f"Skipping CSP plot: Not enough data or classes in this batch to fit CSP properly. {e}")
+
+def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
+    if 'C3' not in ch_names or 'C4' not in ch_names:
+        print("C3 or C4 not found in channels. Skipping STFT plot.")
+        return
+
+    c3_idx = ch_names.index('C3')
+    c4_idx = ch_names.index('C4')
+
+    class_0_idx = np.where(y == 0)[0]
+    class_1_idx = np.where(y == 1)[0]
+
+    def get_avg_stft(data_indices, ch_idx):
+        if len(data_indices) == 0:
+            return None, None, None
+            
+        Sxx_list = []
+        for idx in data_indices:
+            f, t, Sxx = signal.spectrogram(X[idx, ch_idx, :], fs=fs, nperseg=128, noverlap=112)
+            Sxx_list.append(Sxx)
+        return f, t, np.mean(Sxx_list, axis=0)
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+
+    f, t, sxx_c3_0 = get_avg_stft(class_0_idx, c3_idx)
+    f, t, sxx_c4_0 = get_avg_stft(class_0_idx, c4_idx)
+    f, t, sxx_c3_1 = get_avg_stft(class_1_idx, c3_idx)
+    f, t, sxx_c4_1 = get_avg_stft(class_1_idx, c4_idx)
+
+    if f is None:
+        return
+
+    freq_mask = f <= 40
+    f_plot = f[freq_mask]
+
+    vmax = max(sxx_c3_0[freq_mask,:].max(), sxx_c4_0[freq_mask,:].max(),
+               sxx_c3_1[freq_mask,:].max(), sxx_c4_1[freq_mask,:].max())
+
+    im = axs[0, 0].pcolormesh(t, f_plot, sxx_c3_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[0, 0].set_title('Left Hand - C3 (Left Motor Cortex)')
+    axs[0, 0].set_ylabel('Frequency (Hz)')
+
+    axs[0, 1].pcolormesh(t, f_plot, sxx_c4_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[0, 1].set_title('Left Hand - C4 (Right Motor Cortex)')
+
+    axs[1, 0].pcolormesh(t, f_plot, sxx_c3_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[1, 0].set_title('Right Hand - C3')
+    axs[1, 0].set_xlabel('Time (s)')
+    axs[1, 0].set_ylabel('Frequency (Hz)')
+
+    axs[1, 1].pcolormesh(t, f_plot, sxx_c4_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[1, 1].set_title('Right Hand - C4')
+    axs[1, 1].set_xlabel('Time (s)')
+
+    cbar = fig.colorbar(im, ax=axs, orientation='vertical', fraction=0.02, pad=0.04)
+    cbar.set_label('Power Spectral Density')
+    
+    plt.suptitle('Time-Frequency Response (STFT) - Watch for ERD around 8-30 Hz', fontsize=14, fontweight='bold')
+    plt.savefig(os.path.join(save_path, "stft_c3_c4.png"), dpi=300, bbox_inches='tight')
     plt.close(fig)

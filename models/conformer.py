@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from agfl_layer import AGFL
-from standard_none_attention import StandardAttention, NoAttention
+from standard_attention import StandardAttention
 
 class FeedForward(nn.Module):
     def __init__(self, dim, expansion=4, dropout=0.3):
@@ -47,30 +47,6 @@ class ConvModule(nn.Module):
 
         return x.transpose(1, 2)
 
-class StandardAttention(nn.Module):
-    def __init__(self, dim, heads, dropout=0.1):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(
-            embed_dim=dim, 
-            num_heads=heads, 
-            dropout=dropout,
-            batch_first=True
-        )
-        self.last_attn = None
-
-    def forward(self, x):
-        out, attn_weights = self.attn(x, x, x, need_weights=True)
-        self.last_attn = attn_weights.detach() 
-        return out
-
-class NoAttention(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.ff = nn.Linear(dim, dim)
-
-    def forward(self, x):
-        return self.ff(x)
-
 class ConformerBlock(nn.Module):
     def __init__(self, dim, heads, K, mode="agfl", separate_W=True):
         super().__init__()
@@ -84,8 +60,6 @@ class ConformerBlock(nn.Module):
             self.attn = AGFL(dim, heads, K, separate_W)
         elif mode == "standard":
             self.attn = StandardAttention(dim, heads)
-        else:
-            self.attn = NoAttention(dim)
 
         self.conv = ConvModule(dim)
 

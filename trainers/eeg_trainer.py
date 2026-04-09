@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import tqdm
+import copy
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
@@ -48,12 +49,11 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
     model.to(device)
     device_type = 'cuda' if 'cuda' in str(device) else 'cpu'
     
-    opt = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-3) 
+    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3) 
     class_weights = compute_class_weights(train_loader, device)
     
     loss_fn = FocalLoss(weight=class_weights, gamma=3.0)
     
-
     warmup_epochs = 25
     warmup_scheduler = LinearLR(opt, start_factor=0.1, total_iters=warmup_epochs)
     cosine_scheduler = CosineAnnealingLR(opt, T_max=epochs - warmup_epochs)
@@ -62,6 +62,9 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
     scaler = torch.amp.GradScaler(device_type, enabled=(device_type == 'cuda'))
 
     history = {'loss': [], 'val_acc': [], 'lr': []}
+    
+    best_acc = 0.0
+    best_model_wts = copy.deepcopy(model.state_dict())
     
     pbar = tqdm.tqdm(range(epochs), desc="Training Model", unit="epoch")
     
@@ -101,6 +104,10 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
         current_acc = accuracy_score(val_targets, val_preds)
         current_lr = opt.param_groups[0]['lr']
         
+        if current_acc > best_acc:
+            best_acc = current_acc
+            best_model_wts = copy.deepcopy(model.state_dict())
+        
         history['loss'].append(avg_loss)
         history['val_acc'].append(current_acc)
         history['lr'].append(current_lr)
@@ -108,10 +115,13 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
         pbar.set_postfix({
             "Loss": f"{avg_loss:.4f}", 
             "Val Acc": f"{current_acc:.4f}",
+            "Best Acc": f"{best_acc:.4f}",
             "LR": f"{current_lr:.2e}"
         })
 
+    model.load_state_dict(best_model_wts)
     model.eval()
+    
     preds, targets, probs = [], [], []
 
     with torch.no_grad():

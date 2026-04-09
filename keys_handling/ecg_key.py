@@ -1,6 +1,6 @@
 import os
-import torch
 from torch.utils.data import DataLoader
+from datetime import datetime
 
 from data_loaders.ECGDataset import ECGDataset
 from models.conformer import ConformerModel
@@ -12,10 +12,10 @@ from plots.ecg_plots import (
 )
 
 def run_ecg(device, PROJECT_ROOT, model_name, agfl_status):
-    print("Starting ECG Runner...")
     current_dir = os.getcwd()
     data_dir = os.path.join(current_dir, "mit-bih-arrhythmia-database-1.0.0")
-    save_path = os.path.join(current_dir, "agfl", "out_agfl_ecg")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    save_path = os.path.join(current_dir, "agfl", "out_agfl_ecg", timestamp)
     os.makedirs(save_path, exist_ok=True)
 
     train_records = [
@@ -33,16 +33,12 @@ def run_ecg(device, PROJECT_ROOT, model_name, agfl_status):
     train_loader = DataLoader(ECGDataset(train_records, data_dir, is_train=True), batch_size=64, shuffle=True)
     val_loader = DataLoader(ECGDataset(val_records, data_dir), batch_size=64)
 
-    # Determine mode based on AGFL flag
     mode = "agfl" if agfl_status == "on" else "standard"
     display_name = f"{model_name.capitalize()} ({mode.upper()})"
 
     results = {}
     models = {}
-
-    print(f"{display_name} configuration is active\n")
     
-    # You can expand model selection logic here if you add more models
     model = ConformerModel(mode=mode).to(device)
     
     acc, f1, auc, history = train_eval_ecg(model, train_loader, val_loader, device)

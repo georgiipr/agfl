@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from agfl_layer import AGFL
-from standard_none_attention import StandardAttention
+from standard_attention import StandardAttention
 
 class DownProjector(nn.Module):
     def __init__(self, num_channels=22, dropout=0.3):
@@ -181,6 +181,18 @@ class DSTSEEGEncoder(nn.Module):
             ]
         )
 
+    @property
+    def attn_blocks(self):
+        return self.branches[0][1].transformer.blocks
+
     def forward(self, x):
-        x = self.down_projector(x).squeeze(-1)
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+            
+        if x.size(2) < x.size(3):
+            x = x.transpose(2, 3) 
+            
+        x = self.down_projector(x)
+        x = x.squeeze(-1)
+        
         return torch.stack([branch(x) for branch in self.branches]).mean(dim=0)

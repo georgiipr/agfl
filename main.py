@@ -46,7 +46,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-    print(f"Initializing {args.task.upper()} task...")
+    print(f"Initializing {args.task.upper()} task")
     print(f"Device: {device} | Model: {args.model} | AGFL: {args.agfl}")
 
     if args.task == 'ecg':
