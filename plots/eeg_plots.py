@@ -205,20 +205,53 @@ def plot_eeg_epoch(x, save_path, y=None, fs=250.0, channel_names=None):
 
 
 def plot_csp_patterns(X, y, ch_names, save_path, fs=250.0):
+    if hasattr(X, 'numpy'):
+        X = X.numpy()
+    else:
+        X = np.array(X)
+        
+    n_ch = len(ch_names)
+
+    if X.ndim == 4:
+        print(f"Error: CSP failed. Your data 'X' has shape {X.shape}.")
+        print("MNE's CSP requires 3D time-domain data (epochs, channels, times).")
+        print("It looks like you are passing the 4D STFT spectrograms. You must pass the raw EEG signals to this function.")
+        return
+        
+    elif X.ndim == 3:
+        if X.shape[1] != n_ch:
+            if X.shape[2] == n_ch:
+                print(f"Auto-fixing dimensions: Swapping axes from {X.shape} to match MNE's expected (epochs, channels, times).")
+                X = np.swapaxes(X, 1, 2)
+            else:
+                print(f"Error: Number of channel names ({n_ch}) doesn't match axis 1 ({X.shape[1]}) or axis 2 ({X.shape[2]}).")
+                return
+    else:
+        print(f"Error: Unrecognized data dimensions. Expected 3D array, got {X.ndim}D array.")
+        return
+
     info = get_mne_info(ch_names, fs)
+    
     epochs = mne.EpochsArray(X, info, verbose=False)
+    
+    try:
+        epochs.set_montage('standard_1020')
+    except ValueError as e:
+        print(f"Warning: Could not set standard_1020 montage. Ensure channel names match the standard 10-20 system. Error: {e}")
     
     csp = mne.decoding.CSP(n_components=4, reg=None, log=True, norm_trace=False)
     
     try:
         csp.fit(epochs.get_data(copy=False), y)
-        fig = csp.plot_patterns(epochs.info, ch_type='eeg', show=False, size=1.5)
-        fig.suptitle('Common Spatial Patterns (Left vs Right Hand)', fontsize=14, y=1.05)
         
+        fig = csp.plot_patterns(epochs.info, ch_type='eeg', show=False, size=1.5)
+        
+        fig.suptitle('Common Spatial Patterns (Left vs Right Hand)', fontsize=14, y=1.05)
         fig.savefig(os.path.join(save_path, "csp_patterns.png"), dpi=300, bbox_inches='tight')
         plt.close(fig)
+        
     except ValueError as e:
-        print(f"Where is the data? {e}")
+        print(f"Failed to compute or plot CSP: {e}")
 
 def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
     if 'C3' not in ch_names or 'C4' not in ch_names:

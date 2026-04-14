@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 import numpy as np
 
-from data_loaders.BCIDataset import get_eeg_dataloaders
+from data_loaders.BCIDataset_2d import get_eeg_dataloaders
 from models.eegnet import EEGNet
 from models.eegencoder import EEGEncoder
 from models.dsts_eeg_encoder import DSTSEEGEncoder
@@ -27,7 +27,7 @@ MODEL_REGISTRY = {
         attention_type=mode, n_classes=cls, in_chans=ch
     ),
     "dstseegencoder": lambda mode, cls, ch: DSTSEEGEncoder(
-        attention_type=mode, num_classes=cls, num_channels=ch, K=3
+        attention_type=mode, num_classes=cls, num_channels=ch, K=1
     )
 }
 
@@ -60,7 +60,7 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
     model_factory = MODEL_REGISTRY[model_key]
     model = model_factory(mode, num_classes_global, 22).to(device)
     
-    acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=100)
+    acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=300)
     
     print(f"\n{display_name} Results:")
     print(f"  Accuracy : {acc:.4f}")
@@ -107,12 +107,12 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
             
     X_multitrial = np.concatenate(all_x, axis=0)
     Y_multitrial = np.concatenate(all_y, axis=0)
-    loc_ch_names = ['C1', 'Cz', 'C2', 'C4']
+    #loc_ch_names = ['C1', 'Cz', 'C2', 'C4']
 
     plot_csp_patterns(
         X=X_multitrial, 
         y=Y_multitrial, 
-        ch_names=loc_ch_names, 
+        ch_names=BCI2A_CH_NAMES, 
         save_path=save_path, 
         fs=250.0
     )
