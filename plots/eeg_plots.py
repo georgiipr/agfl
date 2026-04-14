@@ -218,7 +218,7 @@ def plot_csp_patterns(X, y, ch_names, save_path, fs=250.0):
         fig.savefig(os.path.join(save_path, "csp_patterns.png"), dpi=300, bbox_inches='tight')
         plt.close(fig)
     except ValueError as e:
-        print(f"Skipping CSP plot: Not enough data or classes in this batch to fit CSP properly. {e}")
+        print(f"Where is the data? {e}")
 
 def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
     if 'C3' not in ch_names or 'C4' not in ch_names:
@@ -251,30 +251,37 @@ def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
     if f is None:
         return
 
+    sxx_c3_0 = 10 * np.log10(sxx_c3_0 + 1e-10)
+    sxx_c4_0 = 10 * np.log10(sxx_c4_0 + 1e-10)
+    sxx_c3_1 = 10 * np.log10(sxx_c3_1 + 1e-10)
+    sxx_c4_1 = 10 * np.log10(sxx_c4_1 + 1e-10)
+
     freq_mask = f <= 40
     f_plot = f[freq_mask]
 
     vmax = max(sxx_c3_0[freq_mask,:].max(), sxx_c4_0[freq_mask,:].max(),
                sxx_c3_1[freq_mask,:].max(), sxx_c4_1[freq_mask,:].max())
+    
+    vmin = vmax - 30
 
-    im = axs[0, 0].pcolormesh(t, f_plot, sxx_c3_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    im = axs[0, 0].pcolormesh(t, f_plot, sxx_c3_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
     axs[0, 0].set_title('Left Hand - C3 (Left Motor Cortex)')
     axs[0, 0].set_ylabel('Frequency (Hz)')
 
-    axs[0, 1].pcolormesh(t, f_plot, sxx_c4_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[0, 1].pcolormesh(t, f_plot, sxx_c4_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
     axs[0, 1].set_title('Left Hand - C4 (Right Motor Cortex)')
 
-    axs[1, 0].pcolormesh(t, f_plot, sxx_c3_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[1, 0].pcolormesh(t, f_plot, sxx_c3_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
     axs[1, 0].set_title('Right Hand - C3')
     axs[1, 0].set_xlabel('Time (s)')
     axs[1, 0].set_ylabel('Frequency (Hz)')
 
-    axs[1, 1].pcolormesh(t, f_plot, sxx_c4_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax)
+    axs[1, 1].pcolormesh(t, f_plot, sxx_c4_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
     axs[1, 1].set_title('Right Hand - C4')
     axs[1, 1].set_xlabel('Time (s)')
 
     cbar = fig.colorbar(im, ax=axs, orientation='vertical', fraction=0.02, pad=0.04)
-    cbar.set_label('Power Spectral Density')
+    cbar.set_label('Power Spectral Density (dB)') 
     
     plt.suptitle('Time-Frequency Response (STFT) - Watch for ERD around 8-30 Hz', fontsize=14, fontweight='bold')
     plt.savefig(os.path.join(save_path, "stft_c3_c4.png"), dpi=300, bbox_inches='tight')

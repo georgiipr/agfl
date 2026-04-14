@@ -107,11 +107,12 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
             
     X_multitrial = np.concatenate(all_x, axis=0)
     Y_multitrial = np.concatenate(all_y, axis=0)
+    loc_ch_names = ['C1', 'Cz', 'C2', 'C4']
 
     plot_csp_patterns(
         X=X_multitrial, 
         y=Y_multitrial, 
-        ch_names=BCI2A_CH_NAMES, 
+        ch_names=loc_ch_names, 
         save_path=save_path, 
         fs=250.0
     )
