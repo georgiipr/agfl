@@ -54,40 +54,41 @@ To ensure it works, put uploaded files into the ml folder in the same directory 
 
 ecg uses arrithmiya dataset. ask the owner for the folder.
 
-Results (latest), were acquired for eeg for two-classes task (left and right hands, classes 0 and 1)
+Results (latest: 16 April), were acquired for eeg for two-classes task (left and right hands, classes 0 and 1)
 ```
-Eegencoder (STANDARD) Results:
-  Accuracy : 0.5423
-  F1 (Macro): 0.5373
-  ROC-AUC (OVR): 0.5127
-
-Eegencoder (AGFL) Results:
-  Accuracy : 0.5538
-  F1 (Macro): 0.3858
-  ROC-AUC (OVR): 0.5085
-
-
-
 Dstseegencoder (STANDARD) Results:
   Accuracy : 0.7577
   F1 (Macro): 0.7574
   ROC-AUC (OVR): 0.8411
+Loss=0.0605
 
 Dstseegencoder (AGFL) Results:
-  Accuracy : 0.5615
-  F1 (Macro): 0.5351
-  ROC-AUC (OVR): 0.5231
-
-
-
-Eegnet (STANDARD) Results:
-  Accuracy : 0.7346
-  F1 (Macro): 0.7337
-  ROC-AUC (OVR): 0.8315
+  Accuracy : 0.5571
+  F1 (Macro): 0.5439
+  ROC-AUC (OVR): 0.5749
+Loss=0.0770
 
 Eegnet (AGFL) Results:
-  Accuracy : 0.7462
-  F1 (Macro): 0.7394
-  ROC-AUC (OVR): 0.8295
+  Accuracy : 0.7473
+  F1 (Macro): 0.7376
+  ROC-AUC (OVR): 0.8375
+Loss=0.0630
+
+Eegnet (STANDARD) Results:
+  Accuracy : 0.7385
+  F1 (Macro): 0.7337
+  ROC-AUC (OVR): 0.8314
+Loss=0.0639
+
+Eegencoder (AGFL) Results:
+  Accuracy : 0.5577
+  F1 (Macro): 0.3699
+  ROC-AUC (OVR): 0.5006
+Loss=0.087
+
+Eegencoder (STANDARD) Results:
+  Accuracy : 0.5423
+  F1 (Macro): 0.5373
+  ROC-AUC (OVR): 0.5127
 ```
 
