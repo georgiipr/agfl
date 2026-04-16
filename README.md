@@ -34,43 +34,60 @@ ToDo:
 4. Accuracy of encoders is horrible
 
 -Data_loaders handle datasets
+
 -Models contain various models, with custom options to either include or exclude agfl_layer (custom attention) and standard MH attention
+
 -Trainers contain the training files for both ecg and eeg
+
 -Plots contain various plotting functions
+
 -keys handles the exectuion of various launch setups
+
 -Main handles general main
 
+
 Note: eeg uses BCI2a IV Competition dataset (.gdf)
+
 Zip can be downloaded from this link: https://www.bbci.de/competition/iv/download/index.html?agree=yes&submit=Submit
 
 To ensure it works, put uploaded files into the ml folder in the same directory where this project is located
+
 ecg uses arrithmiya dataset. ask the owner for the folder.
 
 Results (latest), were acquired for eeg for two-classes task (left and right hands, classes 0 and 1)
 ```
-Eegnet (AGFL) Results:                                                                         
-  Accuracy : 0.7423                                                                            
-  F1 (Macro): 0.7351                                                                           
-  ROC-AUC (OVR): 0.8374
-
-Eegnet (STANDARD) Results:                                                                     
-  Accuracy : 0.7346                                                                            
-  F1 (Macro): 0.7337                                                                           
-  ROC-AUC (OVR): 0.8315
+Eegencoder (STANDARD) Results:
+  Accuracy : 0.5423
+  F1 (Macro): 0.5373
+  ROC-AUC (OVR): 0.5127
 
 Eegencoder (AGFL) Results:
   Accuracy : 0.5538
   F1 (Macro): 0.3858
-  ROC-AUC (OVR): 0.5122
+  ROC-AUC (OVR): 0.5085
 
-Eegencoder (STANDARD) Results:
-  Accuracy : 0.5500
-  F1 (Macro): 0.4256
-  ROC-AUC (OVR): 0.5108
+
+
+Dstseegencoder (STANDARD) Results:
+  Accuracy : 0.7577
+  F1 (Macro): 0.7574
+  ROC-AUC (OVR): 0.8411
 
 Dstseegencoder (AGFL) Results:
   Accuracy : 0.5615
-  F1 (Macro): 0.5603
-  ROC-AUC (OVR): 0.5236
+  F1 (Macro): 0.5351
+  ROC-AUC (OVR): 0.5231
+
+
+
+Eegnet (STANDARD) Results:
+  Accuracy : 0.7346
+  F1 (Macro): 0.7337
+  ROC-AUC (OVR): 0.8315
+
+Eegnet (AGFL) Results:
+  Accuracy : 0.7462
+  F1 (Macro): 0.7394
+  ROC-AUC (OVR): 0.8295
 ```
 
