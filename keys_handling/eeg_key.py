@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 import numpy as np
 
-from data_loaders.BCIDataset_2d import get_eeg_dataloaders
+from depricated.BCIDataset_2d import get_eeg_dataloaders
 from models.eegnet import EEGNet
 from models.eegencoder import EEGEncoder
 from models.dsts_eeg_encoder import DSTSEEGEncoder
@@ -60,7 +60,7 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
     model_factory = MODEL_REGISTRY[model_key]
     model = model_factory(mode, num_classes_global, 22).to(device)
     
-    acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=300)
+    acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=100)
     
     print(f"\n{display_name} Results:")
     print(f"  Accuracy : {acc:.4f}")

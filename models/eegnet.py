@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agfl_layer import AGFL
+from depricated.agfl_layer_0 import AGFL
 from standard_attention import StandardAttention
 
 class EEGNet(nn.Module):

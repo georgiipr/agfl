@@ -2,6 +2,9 @@ import math
 import torch
 import torch.nn as nn
 
+def sparsity_schedule(l, L, smax=0.2, smin=0.8, alpha=3.0):
+    return smin + (smax - smin) * math.exp(-alpha * l / L)
+
 class GraphConstructor(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -40,6 +43,7 @@ class GraphFilter(nn.Module):
         for k in range(1, self.K + 1):
             P_k = A @ P_k # A^k X
             
+            # Apply W_{l,k}
             if self.separate_W:
                 proj = self.W[k](P_k)
             else:
@@ -66,23 +70,31 @@ class AGFL(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.last_adj = None
 
-    def forward(self, X, **kwargs):
+    def forward(self, X, layer_idx, L):
         B, N, D = X.shape
 
         X = X.view(B, N, self.heads, self.dim_h).transpose(1, 2)
+        
+
+        sparsity = sparsity_schedule(layer_idx, L) 
+        k_val = max(1, int((1 - sparsity) * N))
         
         outs = []
         adjs = []
         
         for h in range(self.heads):
             Xh = X[:, h]
-            
             S = self.builders[h](Xh)
             
-            A_dense = torch.softmax(S, dim=-1)
+            if k_val < N:
+                threshold = torch.topk(S, k_val, dim=-1).values[..., -1:]
+                mask = S < threshold
+                S = S.masked_fill(mask, float('-inf'))
             
-            outs.append(self.filters[h](A_dense, Xh))
-            adjs.append(A_dense.detach())
+            A_sparse = torch.softmax(S, dim=-1)
+            
+            outs.append(self.filters[h](A_sparse, Xh))
+            adjs.append(A_sparse.detach())
 
         self.last_adj = torch.stack(adjs)
         

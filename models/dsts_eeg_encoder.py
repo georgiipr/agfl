@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agfl_layer import AGFL
+from depricated.agfl_layer_0 import AGFL
 from standard_attention import StandardAttention
 
 class DownProjector(nn.Module):
@@ -129,7 +129,7 @@ class DSTS(nn.Module):
         self,
         in_channels=32,
         dim=32,
-        num_classes=4,
+        num_classes=2,
         depth=4,
         num_heads=2,
         dropout=0.3,
@@ -156,7 +156,7 @@ class DSTSEEGEncoder(nn.Module):
     def __init__(
         self,
         attention_type='agfl',
-        num_classes=4,
+        num_classes=2,
         num_channels=22,
         num_branches=5,
         dropout=0.3,

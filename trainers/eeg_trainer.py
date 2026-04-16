@@ -45,7 +45,7 @@ def compute_class_weights(train_loader, device):
     return torch.tensor(weights, dtype=torch.float32).to(device)
 
 
-def train_eval_eeg(model, train_loader, val_loader, device, epochs=300, lr=3e-4):
+def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4):
     model.to(device)
     device_type = 'cuda' if 'cuda' in str(device) else 'cpu'
     
@@ -54,7 +54,7 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=300, lr=3e-4)
     
     loss_fn = FocalLoss(weight=class_weights, gamma=3.0)
     
-    warmup_epochs = 25
+    warmup_epochs = 10
     warmup_scheduler = LinearLR(opt, start_factor=0.1, total_iters=warmup_epochs)
     cosine_scheduler = CosineAnnealingLR(opt, T_max=epochs - warmup_epochs)
     scheduler = SequentialLR(opt, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
@@ -73,9 +73,7 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=300, lr=3e-4)
         epoch_loss = 0.0
         
         for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
-            opt.zero_grad(set_to_none=True)
-            
+            x, y = x.to(device), y.to(device)            
             with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=(device_type == 'cuda')):
                 logits = model(x)
                 loss = loss_fn(logits, y)

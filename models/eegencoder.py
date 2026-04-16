@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from agfl_layer import AGFL
+from depricated.agfl_layer_0 import AGFL
 from standard_attention import StandardAttention
 
 class Conv1dL2(nn.Module):
