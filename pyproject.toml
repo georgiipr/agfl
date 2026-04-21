@@ -13,4 +13,5 @@ dependencies = [
     "scipy==1.17.1",
     "tqdm==4.67.1",
     "umap-learn==0.5.11",
+    "mne==1.12.1",
 ]
