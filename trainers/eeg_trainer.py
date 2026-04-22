@@ -73,7 +73,10 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
         epoch_loss = 0.0
         
         for x, y in train_loader:
-            x, y = x.to(device), y.to(device)            
+            x, y = x.to(device), y.to(device)
+            
+            opt.zero_grad()
+            
             with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=(device_type == 'cuda')):
                 logits = model(x)
                 loss = loss_fn(logits, y)
@@ -81,6 +84,9 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+            
+            if hasattr(model, 'clip_weights'):
+                model.clip_weights()
             
             epoch_loss += loss.item()
             
@@ -143,6 +149,5 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
     else:
         auc = roc_auc_score(targets, probs, multi_class='ovr')
     
-    print(f"Final Results -> Accuracy: {acc:.4f} | F1 (Macro): {f1:.4f} | ROC-AUC: {auc:.4f}")
-
+    
     return acc, f1, auc, history

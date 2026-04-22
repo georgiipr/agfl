@@ -3,10 +3,8 @@ import torch
 import numpy as np
 import mne
 from scipy.signal import butter, filtfilt
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data import random_split
+from torch.utils.data import Dataset, random_split, DataLoader
 import warnings
-
 
 def bandpass_eeg_signal(data, fs=250.0, lowcut=2.0, highcut=30.0):
     nyq = 0.5 * fs
@@ -36,9 +34,7 @@ class BCI2aDataset(Dataset):
             X_cont = raw.get_data()[:22, :].astype(np.float32)
             
             X_cont = bandpass_eeg_signal(X_cont, fs=250.0)
-            run_mean = X_cont.mean(axis=-1, keepdims=True)
-            run_std = X_cont.std(axis=-1, keepdims=True) + 1e-8
-            X_cont = (X_cont - run_mean) / run_std
+            
             events, event_dict = mne.events_from_annotations(raw, verbose=False)
             inv_event_dict = {v: k for k, v in event_dict.items()}
             
@@ -51,13 +47,13 @@ class BCI2aDataset(Dataset):
                 event_code = inv_event_dict[event_id]
                 
                 if event_code == '769':
-                    label = 0
+                    label = 0  # Left Hand
                 elif event_code == '770':
-                    label = 1
+                    label = 1  # Right Hand
                 elif event_code == '771':
-                    label = 2
+                    label = 2  # Foot
                 elif event_code == '772':
-                    label = 3
+                    label = 3  # Tongue
                 else:
                     continue 
                     
@@ -67,6 +63,10 @@ class BCI2aDataset(Dataset):
                     continue
                     
                 trial_data = X_cont[:, actual_start : actual_start + max_window_size]
+                
+                t_mean = trial_data.mean(axis=-1, keepdims=True)
+                t_std = trial_data.std(axis=-1, keepdims=True) + 1e-8
+                trial_data = (trial_data - t_mean) / t_std
                 
                 self.samples.append(trial_data)
                 self.labels.append(label)
@@ -83,19 +83,16 @@ class BCI2aDataset(Dataset):
         return x, y
 
 
-def get_eeg_dataloaders(data_dir="./ml", batch_size=64):
-    all_subjects = list(range(1, 10))
+
+def get_eeg_dataloaders(data_dir="./ml", subject_id=1, batch_size=64):
+    full_dataset = BCI2aDataset(data_dir, subjects=[subject_id], is_train=True)
     
-    full_dataset = BCI2aDataset(data_dir, subjects=all_subjects, is_train=True)
+    total_samples = len(full_dataset)
+    train_size = int(0.8 * total_samples)
+    val_size = total_samples - train_size
     
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    
-    train_dataset, eval_dataset = random_split(
-        full_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, eval_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
     
     train_loader = DataLoader(
         train_dataset, 
