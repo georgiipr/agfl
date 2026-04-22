@@ -129,7 +129,7 @@ class DSTS(nn.Module):
         self,
         in_channels=32,
         dim=32,
-        num_classes=2,
+        num_classes=4,
         depth=4,
         num_heads=2,
         dropout=0.3,
@@ -156,7 +156,7 @@ class DSTSEEGEncoder(nn.Module):
     def __init__(
         self,
         attention_type='agfl',
-        num_classes=2,
+        num_classes=4,
         num_channels=22,
         num_branches=5,
         dropout=0.3,

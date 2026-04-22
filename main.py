@@ -36,9 +36,9 @@ def main():
     parser.add_argument(
         '--agfl',
         type=str,
-        choices=['on', 'off'],
+        choices=['on', 'off', 'none'],
         default='off',
-        help="Toggle custom AGFL attention: 'on' or 'off'"
+        help="Toggle custom AGFL attention: 'on' or 'off' or 'none"
     )
     
     args = parser.parse_args()
@@ -52,7 +52,7 @@ def main():
     if args.task == 'ecg':
         run_ecg(device, PROJECT_ROOT, model_name=args.model, agfl_status=args.agfl)
     elif args.task == 'eeg':
-        run_eeg(device, PROJECT_ROOT, model_name=args.model, agfl_status=args.agfl, num_classes_global=2)
+        run_eeg(device, PROJECT_ROOT, model_name=args.model, agfl_status=args.agfl, num_classes_global=4)
 
 if __name__ == "__main__":
     main()

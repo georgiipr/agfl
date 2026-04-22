@@ -191,7 +191,8 @@ def plot_eeg_epoch(x, save_path, y=None, fs=250.0, channel_names=None):
         
     title = 'EEG Epoch Visualization'
     if y is not None:
-        label_map = {0: 'Left Hand (Class 1)', 1: 'Right Hand (Class 2)'}
+        # UPDATED: 4 Classes
+        label_map = {0: 'Left Hand', 1: 'Right Hand', 2: 'Foot', 3: 'Tongue'}
         title += f" - {label_map.get(y, f'Class {y}')}"
         
     ax.set_title(title, fontsize=14, pad=15)
@@ -205,45 +206,61 @@ def plot_eeg_epoch(x, save_path, y=None, fs=250.0, channel_names=None):
 
 
 def plot_csp_patterns(X, y, ch_names, save_path, fs=250.0):
-    if hasattr(X, 'numpy'):
-        X = X.numpy()
+    if hasattr(X, 'cpu'):
+        X = X.cpu().numpy()
+    if hasattr(y, 'cpu'):
+        y = y.cpu().numpy()
+        
+    target_chs = ['C3', 'Cz', 'C4', 'Pz']
+    ch_indices = [ch_names.index(ch) for ch in target_chs if ch in ch_names]
+    
+    if len(ch_indices) == 4:
+        X = X[:, ch_indices, :]
+        ch_names = [ch_names[i] for i in ch_indices]
     else:
-        X = np.array(X)
+        print(f"Warning: Could not isolate {target_chs}. Ensure they are in ch_names.")
         
     n_ch = len(ch_names)
 
-    if X.ndim == 4:
-        print(f"Error: CSP failed. Your data 'X' has shape {X.shape}.")
-        print("MNE's CSP requires 3D time-domain data (epochs, channels, times).")
-        print("It looks like you are passing the 4D STFT spectrograms. You must pass the raw EEG signals to this function.")
+    # 1. MASK FOR BINARY CLASSIFICATION (Left Hand vs Right Hand)
+    # MNE's plot_patterns cannot handle 4 classes natively.
+    binary_mask = (y == 0) | (y == 1)
+    X_bin = X[binary_mask]
+    y_bin = y[binary_mask]
+    
+    # Safety check: Ensure the current batch has both classes
+    if len(np.unique(y_bin)) < 2:
+        print("Warning: Not enough classes in this batch to plot CSP (need 0 and 1). Skipping.")
         return
-        
-    elif X.ndim == 3:
-        if X.shape[1] != n_ch:
-            if X.shape[2] == n_ch:
-                print(f"Auto-fixing dimensions: Swapping axes from {X.shape} to match MNE's expected (epochs, channels, times).")
-                X = np.swapaxes(X, 1, 2)
+
+    if X_bin.ndim == 4:
+        print(f"Error: CSP failed. Your data 'X' has shape {X_bin.shape}.")
+        return
+    elif X_bin.ndim == 3:
+        if X_bin.shape[1] != n_ch:
+            if X_bin.shape[2] == n_ch:
+                X_bin = np.swapaxes(X_bin, 1, 2)
             else:
-                print(f"Error: Number of channel names ({n_ch}) doesn't match axis 1 ({X.shape[1]}) or axis 2 ({X.shape[2]}).")
+                print(f"Error: Channel names mismatch.")
                 return
     else:
-        print(f"Error: Unrecognized data dimensions. Expected 3D array, got {X.ndim}D array.")
         return
 
     info = get_mne_info(ch_names, fs)
-    
-    epochs = mne.EpochsArray(X, info, verbose=False)
+    epochs = mne.EpochsArray(X_bin, info, verbose=False)
     
     try:
         epochs.set_montage('standard_1020')
     except ValueError as e:
-        print(f"Warning: Could not set standard_1020 montage. Ensure channel names match the standard 10-20 system. Error: {e}")
+        print(f"Warning: Could not set standard_1020 montage. Error: {e}")
     
+    # 2. Fit the binary CSP
     csp = mne.decoding.CSP(n_components=4, reg=None, log=True, norm_trace=False)
     
     try:
-        csp.fit(epochs.get_data(copy=False), y)
+        csp.fit(epochs.get_data(copy=False), y_bin)
         
+        # 3. Plot patterns (Will now work because it's a binary fit)
         fig = csp.plot_patterns(epochs.info, ch_type='eeg', show=False, size=1.5)
         
         fig.suptitle('Common Spatial Patterns (Left vs Right Hand)', fontsize=14, y=1.05)
@@ -260,9 +277,8 @@ def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
 
     c3_idx = ch_names.index('C3')
     c4_idx = ch_names.index('C4')
-
-    class_0_idx = np.where(y == 0)[0]
-    class_1_idx = np.where(y == 1)[0]
+    
+    class_labels = ['Left Hand', 'Right Hand', 'Foot', 'Tongue']
 
     def get_avg_stft(data_indices, ch_idx):
         if len(data_indices) == 0:
@@ -274,48 +290,55 @@ def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
             Sxx_list.append(Sxx)
         return f, t, np.mean(Sxx_list, axis=0)
 
-    fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+    fig, axs = plt.subplots(4, 2, figsize=(10, 12), sharex=True, sharey=True)
 
-    f, t, sxx_c3_0 = get_avg_stft(class_0_idx, c3_idx)
-    f, t, sxx_c4_0 = get_avg_stft(class_0_idx, c4_idx)
-    f, t, sxx_c3_1 = get_avg_stft(class_1_idx, c3_idx)
-    f, t, sxx_c4_1 = get_avg_stft(class_1_idx, c4_idx)
+    all_sxx = []
+    plot_data = []
 
-    if f is None:
+    for i in range(4):
+        class_idx = np.where(y == i)[0]
+        f, t, sxx_c3 = get_avg_stft(class_idx, c3_idx)
+        f, t, sxx_c4 = get_avg_stft(class_idx, c4_idx)
+        
+        if f is not None:
+            s3_db = 10 * np.log10(sxx_c3 + 1e-10)
+            s4_db = 10 * np.log10(sxx_c4 + 1e-10)
+            all_sxx.extend([s3_db, s4_db])
+            plot_data.append((s3_db, s4_db))
+        else:
+            plot_data.append((None, None))
+
+    if not all_sxx:
         return
-
-    sxx_c3_0 = 10 * np.log10(sxx_c3_0 + 1e-10)
-    sxx_c4_0 = 10 * np.log10(sxx_c4_0 + 1e-10)
-    sxx_c3_1 = 10 * np.log10(sxx_c3_1 + 1e-10)
-    sxx_c4_1 = 10 * np.log10(sxx_c4_1 + 1e-10)
 
     freq_mask = f <= 40
     f_plot = f[freq_mask]
-
-    vmax = max(sxx_c3_0[freq_mask,:].max(), sxx_c4_0[freq_mask,:].max(),
-               sxx_c3_1[freq_mask,:].max(), sxx_c4_1[freq_mask,:].max())
-    
+    vmax = max([s[freq_mask, :].max() for s in all_sxx])
     vmin = vmax - 30
 
-    im = axs[0, 0].pcolormesh(t, f_plot, sxx_c3_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
-    axs[0, 0].set_title('Left Hand - C3 (Left Motor Cortex)')
-    axs[0, 0].set_ylabel('Frequency (Hz)')
+    im = None
+    for i in range(4):
+        s3, s4 = plot_data[i]
+        
+        if s3 is not None:
+            im = axs[i, 0].pcolormesh(t, f_plot, s3[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
+            axs[i, 0].set_ylabel('Freq (Hz)')
+            if i == 0: axs[i, 0].set_title('C3 (Left Motor Cortex)')
+            
+            axs[i, 1].pcolormesh(t, f_plot, s4[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
+            if i == 0: axs[i, 1].set_title('C4 (Right Motor Cortex)')
+            axs[i, 1].text(1.05, 0.5, class_labels[i], transform=axs[i, 1].transAxes, fontsize=12, va='center', rotation=-90, fontweight='bold')
+        else:
+            axs[i, 0].text(0.5, 0.5, 'No Data', ha='center', va='center')
+            axs[i, 1].text(0.5, 0.5, 'No Data', ha='center', va='center')
 
-    axs[0, 1].pcolormesh(t, f_plot, sxx_c4_0[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
-    axs[0, 1].set_title('Left Hand - C4 (Right Motor Cortex)')
+    axs[3, 0].set_xlabel('Time (s)')
+    axs[3, 1].set_xlabel('Time (s)')
 
-    axs[1, 0].pcolormesh(t, f_plot, sxx_c3_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
-    axs[1, 0].set_title('Right Hand - C3')
-    axs[1, 0].set_xlabel('Time (s)')
-    axs[1, 0].set_ylabel('Frequency (Hz)')
-
-    axs[1, 1].pcolormesh(t, f_plot, sxx_c4_1[freq_mask, :], shading='gouraud', cmap='viridis', vmax=vmax, vmin=vmin)
-    axs[1, 1].set_title('Right Hand - C4')
-    axs[1, 1].set_xlabel('Time (s)')
-
-    cbar = fig.colorbar(im, ax=axs, orientation='vertical', fraction=0.02, pad=0.04)
-    cbar.set_label('Power Spectral Density (dB)') 
+    if im:
+        cbar = fig.colorbar(im, ax=axs, orientation='vertical', fraction=0.03, pad=0.08)
+        cbar.set_label('Power Spectral Density (dB)') 
     
-    plt.suptitle('Time-Frequency Response (STFT) - Watch for ERD around 8-30 Hz', fontsize=14, fontweight='bold')
+    plt.suptitle('Time-Frequency Response (STFT) - Watch for ERD (8-30 Hz)', fontsize=14, fontweight='bold', y=0.92)
     plt.savefig(os.path.join(save_path, "stft_c3_c4.png"), dpi=300, bbox_inches='tight')
     plt.close(fig)

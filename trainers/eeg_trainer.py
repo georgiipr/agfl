@@ -54,7 +54,7 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4)
     
     loss_fn = FocalLoss(weight=class_weights, gamma=3.0)
     
-    warmup_epochs = 10
+    warmup_epochs = 20
     warmup_scheduler = LinearLR(opt, start_factor=0.1, total_iters=warmup_epochs)
     cosine_scheduler = CosineAnnealingLR(opt, T_max=epochs - warmup_epochs)
     scheduler = SequentialLR(opt, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])

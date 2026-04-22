@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 import numpy as np
 
-from depricated.BCIDataset_2d import get_eeg_dataloaders
+from data_loaders.BCIDataset import get_eeg_dataloaders
 from models.eegnet import EEGNet
 from models.eegencoder import EEGEncoder
 from models.dsts_eeg_encoder import DSTSEEGEncoder
@@ -46,7 +46,7 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
     y_single = y_batch[0]
     plot_eeg_epoch(x_single, save_path, y_single, fs=250.0)
 
-    mode = "agfl" if agfl_status == "on" else "standard"
+    mode = "agfl" if agfl_status == "on" else "standard" if agfl_status == "off" else "none"
     display_name = f"{model_name.capitalize()} ({mode.upper()})"
 
     results = {}

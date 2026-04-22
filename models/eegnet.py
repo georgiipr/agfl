@@ -6,7 +6,7 @@ from depricated.agfl_layer_0 import AGFL
 from standard_attention import StandardAttention
 
 class EEGNet(nn.Module):
-    def __init__(self, num_channels=22, num_classes=2, samples=1000, 
+    def __init__(self, num_channels=22, num_classes=4, samples=1000, 
                  F1=8, D=2, F2=16, attention_type='standard', dropout_rate=0.5):
         super(EEGNet, self).__init__()
         self.attention_type = attention_type

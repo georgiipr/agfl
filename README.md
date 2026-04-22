@@ -23,9 +23,10 @@ state:
 ```
 1. on
 2. off
+3. none
 ```
 
-note: state off means standard MultiHeaded attention is being used
+note: state off means standard MultiHeaded attention is being used, None - no attention
 
 
 
@@ -52,39 +53,14 @@ ecg uses arrithmiya dataset. ask the owner for the folder.
 
 Results (latest: 16 April), were acquired for eeg for two-classes task (left and right hands, classes 0 and 1)
 ```
-Dstseegencoder (STANDARD) Results:
-  Accuracy : 0.7577
-  F1 (Macro): 0.7574
-  ROC-AUC (OVR): 0.8411
-Loss=0.0605
+EEGEncoder (AGFL): -> Accuracy: 0.3565 | F1 (Macro): 0.2829 | ROC-AUC: 0.6302 | Loss: 0.5460
+EEGEncoder (STANDARD) -> Accuracy: 0.3565 | F1 (Macro): 0.2970 | ROC-AUC: 0.6188 | Loss: 0.5537
 
-Dstseegencoder (AGFL) Results:
-  Accuracy : 0.5571
-  F1 (Macro): 0.5439
-  ROC-AUC (OVR): 0.5749
-Loss=0.0770
+Eegnet (AGFL) -> Accuracy: 0.5010 | F1 (Macro): 0.4816 | ROC-AUC: 0.7413
+EEGNet (Standard) -> Accuracy: 0.4663 | F1 (Macro): 0.4592 | ROC-AUC: 0.7439
 
-Eegnet (AGFL) Results:
-  Accuracy : 0.7473
-  F1 (Macro): 0.7376
-  ROC-AUC (OVR): 0.8375
-Loss=0.0630
-
-Eegnet (STANDARD) Results:
-  Accuracy : 0.7385
-  F1 (Macro): 0.7337
-  ROC-AUC (OVR): 0.8314
-Loss=0.0639
-
-Eegencoder (AGFL) Results:
-  Accuracy : 0.5577
-  F1 (Macro): 0.3699
-  ROC-AUC (OVR): 0.5006
-Loss=0.087
-
-Eegencoder (STANDARD) Results:
-  Accuracy : 0.5423
-  F1 (Macro): 0.5373
-  ROC-AUC (OVR): 0.5127
+Dstseegencoder (STANDARD) -> Accuracy: 0.4933 | F1 (Macro): 0.4782 | ROC-AUC: 0.7616
+Dstseegencoder (AGFL) -> Accuracy: 0.3430 | F1 (Macro): 0.3392 | ROC-AUC: 0.5825
+Dstseegencoder (NONE) -> Accuracy: 0.3295 | F1 (Macro): 0.3248 | ROC-AUC: 0.5500
 ```
 

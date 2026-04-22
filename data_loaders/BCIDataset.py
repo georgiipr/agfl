@@ -1,10 +1,20 @@
 import os
 import torch
-import torch.nn.functional as F
 import numpy as np
 import mne
+from scipy.signal import butter, filtfilt
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import random_split
 import warnings
+
+
+def bandpass_eeg_signal(data, fs=250.0, lowcut=2.0, highcut=30.0):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(4, [low, high], btype='band')
+    return filtfilt(b, a, data, axis=-1)
+
 
 class BCI2aDataset(Dataset):
     def __init__(self, data_dir, subjects, is_train=True):
@@ -23,74 +33,94 @@ class BCI2aDataset(Dataset):
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 raw = mne.io.read_raw_gdf(filepath, preload=True, verbose='ERROR')
             
-            raw.pick(picks=range(22))
-            raw.notch_filter(freqs=50.0, verbose='ERROR')
-            raw.filter(l_freq=2.0, h_freq=30.0, fir_design='firwin', verbose='ERROR')
+            # Extract only the 22 EEG channels
+            X_cont = raw.get_data()[:22, :].astype(np.float32)
             
-            raw.set_eeg_reference('average', projection=False, verbose='ERROR')
+            # Apply SciPy bandpass filter
+            X_cont = bandpass_eeg_signal(X_cont, fs=250.0)
             
-            events, event_dict = mne.events_from_annotations(raw, verbose='ERROR')
-            target_event_id = {k: v for k, v in event_dict.items() if k in ['769', '770']}
+            # Continuous standardization across the whole session
+            run_mean = X_cont.mean(axis=-1, keepdims=True)
+            run_std = X_cont.std(axis=-1, keepdims=True) + 1e-8
+            X_cont = (X_cont - run_mean) / run_std
+            
+            # Extract events
+            events, event_dict = mne.events_from_annotations(raw, verbose=False)
             inv_event_dict = {v: k for k, v in event_dict.items()}
             
-            epochs = mne.Epochs(
-                raw, 
-                events, 
-                event_id=target_event_id, 
-                tmin=-0.5, 
-                tmax=4.5, 
-                baseline=(-0.5, 0.0), 
-                preload=True, 
-                verbose='ERROR'
-            )
+            # Trial extraction parameters (0.5s to 4.5s post-cue)
+            offset = int(0.5 * 250)
+            max_window_size = int(4.0 * 250)
             
-            X_epoched = epochs.get_data()
-            y_events = epochs.events[:, 2]
-            
-            start_idx = int(1.0 * 250) 
-            end_idx = start_idx + int(4.0 * 250)
-            
-            for i in range(len(X_epoched)):
-                event_code = inv_event_dict[y_events[i]]
-                label = 0 if event_code == '769' else 1
+            for event in events:
+                start_idx = event[0]
+                event_id = event[2]
+                event_code = inv_event_dict[event_id]
                 
-                trial_data = X_epoched[i, :, start_idx:end_idx]
+                # Map all 4 classes
+                if event_code == '769':
+                    label = 0  # Left Hand
+                elif event_code == '770':
+                    label = 1  # Right Hand
+                elif event_code == '771':
+                    label = 2  # Foot
+                elif event_code == '772':
+                    label = 3  # Tongue
+                else:
+                    continue 
+                    
+                actual_start = start_idx + offset
                 
-                trial_data = trial_data * 1e6
+                # Skip if the window exceeds the recorded data
+                if actual_start + max_window_size > X_cont.shape[1]:
+                    continue
+                    
+                trial_data = X_cont[:, actual_start : actual_start + max_window_size]
                 
-                trial_std = trial_data.std(axis=-1, keepdims=True) + 1e-8
-                trial_data = trial_data / trial_std 
-                
-                self.samples.append(trial_data.astype(np.float32))
+                self.samples.append(trial_data)
                 self.labels.append(label)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        x = torch.from_numpy(self.samples[idx])
+        x = torch.from_numpy(self.samples[idx]).float()
         y = torch.tensor(self.labels[idx], dtype=torch.long)
         
-        n_fft = 500 
-        hop_length = 6
-        window = torch.hann_window(n_fft)
-        
-        stft_res = torch.stft(
-            x, 
-            n_fft=n_fft, 
-            hop_length=hop_length, 
-            win_length=n_fft, 
-            window=window, 
-            return_complex=True
-        )
-        
-        mag = torch.abs(stft_res)
-        mag = mag[:, 4:60, :]
-        
-        if mag.shape[2] >= 80:
-            mag = mag[:, :, :80]
-        else:
-            pad_size = 80 - mag.shape[2]
-            mag = F.pad(mag, (0, pad_size))
+        # Ensure exact 1000 sequence length
+        x = x[:, :1000]
             
-        return mag, y
+        return x, y
+
+
+def get_eeg_dataloaders(data_dir="./ml", batch_size=64):
+    all_subjects = list(range(1, 10))
+    
+    full_dataset = BCI2aDataset(data_dir, subjects=all_subjects, is_train=True)
+    
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    
+    train_dataset, eval_dataset = random_split(
+        full_dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=4, 
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        eval_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=4, 
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader
