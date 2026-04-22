@@ -33,22 +33,15 @@ class BCI2aDataset(Dataset):
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 raw = mne.io.read_raw_gdf(filepath, preload=True, verbose='ERROR')
             
-            # Extract only the 22 EEG channels
             X_cont = raw.get_data()[:22, :].astype(np.float32)
             
-            # Apply SciPy bandpass filter
             X_cont = bandpass_eeg_signal(X_cont, fs=250.0)
-            
-            # Continuous standardization across the whole session
             run_mean = X_cont.mean(axis=-1, keepdims=True)
             run_std = X_cont.std(axis=-1, keepdims=True) + 1e-8
             X_cont = (X_cont - run_mean) / run_std
-            
-            # Extract events
             events, event_dict = mne.events_from_annotations(raw, verbose=False)
             inv_event_dict = {v: k for k, v in event_dict.items()}
             
-            # Trial extraction parameters (0.5s to 4.5s post-cue)
             offset = int(0.5 * 250)
             max_window_size = int(4.0 * 250)
             
@@ -57,21 +50,19 @@ class BCI2aDataset(Dataset):
                 event_id = event[2]
                 event_code = inv_event_dict[event_id]
                 
-                # Map all 4 classes
                 if event_code == '769':
-                    label = 0  # Left Hand
+                    label = 0
                 elif event_code == '770':
-                    label = 1  # Right Hand
+                    label = 1
                 elif event_code == '771':
-                    label = 2  # Foot
+                    label = 2
                 elif event_code == '772':
-                    label = 3  # Tongue
+                    label = 3
                 else:
                     continue 
                     
                 actual_start = start_idx + offset
                 
-                # Skip if the window exceeds the recorded data
                 if actual_start + max_window_size > X_cont.shape[1]:
                     continue
                     
@@ -87,7 +78,6 @@ class BCI2aDataset(Dataset):
         x = torch.from_numpy(self.samples[idx]).float()
         y = torch.tensor(self.labels[idx], dtype=torch.long)
         
-        # Ensure exact 1000 sequence length
         x = x[:, :1000]
             
         return x, y
