@@ -45,7 +45,7 @@ def compute_class_weights(train_loader, device):
     return torch.tensor(weights, dtype=torch.float32).to(device)
 
 
-def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=3e-4):
+def train_eval_eeg(model, train_loader, val_loader, device, epochs=100, lr=5e-3):
     model.to(device)
     device_type = 'cuda' if 'cuda' in str(device) else 'cpu'
     
