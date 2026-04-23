@@ -63,7 +63,7 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
 
         model = model_factory(mode, num_classes_global, 22).to(device)
         
-        acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=100)
+        acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=250)
         
         all_acc.append(acc)
         all_f1.append(f1)

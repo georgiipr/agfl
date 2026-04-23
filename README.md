@@ -63,9 +63,16 @@ EEGNet:
   Average Accuracy : 0.6724
   Average F1 Score : 0.6663
   Average ROC-AUC  : 0.8257
+
 (None Attention)
   Average Accuracy : 0.6686
   Average F1 Score : 0.6569
   Average ROC-AUC  : 0.8234
+
+DSTSEEGEncoder:
+(None attention)
+  Average Accuracy : 0.3927
+  Average F1 Score : 0.3582
+  Average ROC-AUC  : 0.5904
 ```
 
