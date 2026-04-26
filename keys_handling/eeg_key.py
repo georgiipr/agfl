@@ -68,7 +68,7 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global, t
             data_dir=data_dir, 
             subject_id=subject_id, 
             batch_size=64,
-            is_cnn=is_snn
+            is_snn=is_snn
         )
 
         in_channels = 44 if is_snn else 22
