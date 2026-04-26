@@ -13,8 +13,6 @@ model_name:
 ```
 1. snn
 2. eegnet
-3. eegencoder
-4. dstseegencoder
 ```
 
 note: conformer currently for ecg, other models for eeg only
@@ -30,9 +28,8 @@ note: state off means standard MultiHeaded attention is being used, None - no at
 
 
 
--Data_loaders handle datasets
-
--Models contain various models, with custom options to either include or exclude agfl_layer (custom attention) and standard MH attention
+-Data_loader handles the dataset plus processing for the SNN\
+-Models contain various models, with custom options to either include or exclude agfl_layer (custom attention) and standard MH attention\
 
 -Trainers contain the training files for both ecg and eeg
 
