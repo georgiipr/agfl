@@ -28,7 +28,7 @@ MODEL_REGISTRY = {
     "dstseegencoder": lambda mode, cls, ch: DSTSEEGEncoder(
         attention_type=mode, num_classes=cls, num_channels=ch, K=1
     ),
-    "spikingeegnet": lambda mode, cls, ch: SpikingEEGNet(
+    "snn": lambda mode, cls, ch: SpikingEEGNet(
         attention_type=mode, num_classes=cls, num_channels=ch
     )
 }

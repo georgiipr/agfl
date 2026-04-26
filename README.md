@@ -15,8 +15,6 @@ model_name:
 2. eegnet
 ```
 
-note: conformer currently for ecg, other models for eeg only
-
 state:
 ```
 1. on
