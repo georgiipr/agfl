@@ -102,44 +102,46 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
 
     final_metrics = copy.deepcopy(initial_metrics)
 
-    # ========================================================
-    # PHASE 3 & 4: KNOWLEDGE TRANSFER & FINE-TUNING
-    # ========================================================
     if len(good_subjects) > 0 and len(bad_subjects) > 0:
         print("\n" + "="*50)
         print(" PHASE 3 & 4: KNOWLEDGE TRANSFER & FINE-TUNING")
         print("="*50)
         
-        # Create Average Donor State Dict
-        donor_state = copy.deepcopy(models[good_subjects[0]].state_dict())
-        for key in donor_state:
-            for sid in good_subjects[1:]:
-                donor_state[key] += models[sid].state_dict()[key]
-            
-            # Divide to get average. (Check float vs long to avoid PyTorch errors on BatchNorm variables)
-            if donor_state[key].is_floating_point():
-                donor_state[key] = donor_state[key] / len(good_subjects)
+        donor_state = {}
+        for key in models[good_subjects[0]].state_dict():
+            stacked = torch.stack([models[sid].state_dict()[key] for sid in good_subjects])
+            if stacked.is_floating_point():
+                donor_state[key] = stacked.mean(dim=0)
             else:
-                donor_state[key] = donor_state[key] // len(good_subjects)
+                donor_state[key] = stacked.float().mean(dim=0).long()
 
-        # Apply and Fine-Tune Bad Models
+        alpha = 0.5
+        
         for bad_sid in bad_subjects:
-            print(f"\n>>> Fine-Tuning Subject {bad_sid} with Donor Weights...")
+            print(f"\n>>> Fine-Tuning Subject {bad_sid} with Knowledge Transfer...")
             model = models[bad_sid]
-            model.load_state_dict(donor_state)
+            bad_state = model.state_dict()
+            
+            new_state = {}
+            for key in bad_state:
+                if "running" in key or "tracked" in key or "num_batches" in key:
+                    new_state[key] = bad_state[key]
+                    
+                elif bad_state[key].is_floating_point():
+                    new_state[key] = (alpha * donor_state[key]) + ((1 - alpha) * bad_state[key])
+                    
+                else:
+                    new_state[key] = donor_state[key]
+                    
+            model.load_state_dict(new_state)
 
             train_loader, val_loader = dataloaders[bad_sid]
 
-            # FINE TUNE: Drop epochs to 50 and learning rate to 1e-4 so we don't break the donor weights!
             acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=50, lr=1e-4)
 
-            # Update with new metrics
             final_metrics[bad_sid] = {'acc': acc, 'f1': f1, 'auc': auc, 'history': history}
             print(f"Subject {bad_sid} New Acc: {acc:.4f} (was {initial_metrics[bad_sid]['acc']:.4f})")
 
-    print("\n" + "="*50)
-    print(" PHASE 5: FINAL PLOTTING & REPORTING")
-    print("="*50)
 
     all_final_acc, all_final_f1, all_final_auc = [], [], []
 
