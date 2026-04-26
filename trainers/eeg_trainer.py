@@ -39,13 +39,10 @@ def compute_class_weights(train_loader, device):
     
     weights = total_samples / (num_classes * class_counts)
     
-    print(f"Class counts: {class_counts}")
-    print(f"Applied weights: {weights}")
-    
     return torch.tensor(weights, dtype=torch.float32).to(device)
 
 
-def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3):
+def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3, is_snn=False):
     model.to(device)
     device_type = 'cuda' if 'cuda' in str(device) else 'cpu'
     
@@ -62,7 +59,6 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3)
     scaler = torch.amp.GradScaler(device_type, enabled=(device_type == 'cuda'))
 
     history = {'loss': [], 'val_acc': [], 'lr': []}
-    
     best_acc = 0.0
     best_model_wts = copy.deepcopy(model.state_dict())
     
@@ -82,10 +78,15 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3)
                 loss = loss_fn(logits, y)
 
             scaler.scale(loss).backward()
+            
+            if is_snn:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(opt)
             scaler.update()
             
-            if hasattr(model, 'clip_weights'):
+            if not is_snn and hasattr(model, 'clip_weights'):
                 model.clip_weights()
             
             epoch_loss += loss.item()
@@ -119,8 +120,7 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3)
         pbar.set_postfix({
             "Loss": f"{avg_loss:.4f}", 
             "Val Acc": f"{current_acc:.4f}",
-            "Best Acc": f"{best_acc:.4f}",
-            "LR": f"{current_lr:.2e}"
+            "Best Acc": f"{best_acc:.4f}"
         })
 
     model.load_state_dict(best_model_wts)
@@ -148,6 +148,5 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3)
         auc = roc_auc_score(targets, probs[:, 1])
     else:
         auc = roc_auc_score(targets, probs, multi_class='ovr')
-    
     
     return acc, f1, auc, history

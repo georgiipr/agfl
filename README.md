@@ -6,12 +6,12 @@ PYTHONPATH=. python3 agfl/main.py --task <task_name> --model <model_name> --agfl
 task_name:
 ```
 1. eeg
-2. ecg
+2. nc
 ```
 
 model_name:
 ```
-1. conformer
+1. snn
 2. eegnet
 3. eegencoder
 4. dstseegencoder
@@ -49,10 +49,21 @@ Zip can be downloaded from this link: https://www.bbci.de/competition/iv/downloa
 
 To ensure it works, put uploaded files into the ml folder in the same directory where this project is located
 
-ecg uses arrithmiya dataset. ask the owner for the folder.
 
-Results (latest: 23 April), were acquired for eeg for 4-classes task for separate subjects (averaged)
+
+While traditional Spiking Neural Networks (SNNs) rely on the natural dynamics of Leaky Integrate-and-Fire (LIF) neurons to capture temporal relationships (acting as biological low-pass filters), their memory is inherently short-term. As time passes, the membrane potential leaks, and long-range dependencies in the EEG signal can fade.
+
+Integrating an attention mechanism creates a hybrid architecture. The SNN acts as an efficient, highly sparse feature extractor, mapping the EEG channels into discrete spike trains. The attention layer then acts as a router, looking across the entire temporal sequence of spikes to weigh the most critical "events" (like the onset of a motor imagery task) while ignoring the silent or noisy periods.
+
+Spiking EEGNet: built via snnTorch.
+Difference from standard EEGNet: As the LIF neurons can handle the time dimension, we have no need for the 2D temporal convolutions from the standard EEGNet.
+
+Instead, we apply spatial 1D convolutions at each timestep, feed them into the spiking neurons, collect the temporal sequence, and pass that sequence to the attention blocks.
+
+
 ```
+Results:
+
 EEGNet:
 (Standard attention)
   Average Accuracy : 0.7299
@@ -64,15 +75,5 @@ EEGNet:
   Average F1 Score : 0.7626
   Average ROC-AUC  : 0.8707
 
-(None Attention) - old but lower still
-  Average Accuracy : 0.6686
-  Average F1 Score : 0.6569
-  Average ROC-AUC  : 0.8234
-
-DSTSEEGEncoder:
-(None attention)
-  Average Accuracy : 0.3927
-  Average F1 Score : 0.3582
-  Average ROC-AUC  : 0.5904
 ```
 
