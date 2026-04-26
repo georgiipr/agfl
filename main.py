@@ -6,7 +6,7 @@ import random
 import warnings
 
 from keys_handling.ecg_key import run_ecg
-from keys_handling.eeg_key import run_eeg
+from keys_handling.eeg_key_depricated import run_eeg
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_scheduler")
 

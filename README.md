@@ -55,16 +55,16 @@ Results (latest: 23 April), were acquired for eeg for 4-classes task for separat
 ```
 EEGNet:
 (Standard attention)
-  Average Accuracy : 0.6839
-  Average F1 Score : 0.6774
-  Average ROC-AUC  : 0.8406
+  Average Accuracy : 0.7299
+  Average F1 Score : 0.7204
+  Average ROC-AUC  : 0.8650
 
 (AGFL Attention)
-  Average Accuracy : 0.6724
-  Average F1 Score : 0.6663
-  Average ROC-AUC  : 0.8257
+  Average Accuracy : 0.7663
+  Average F1 Score : 0.7626
+  Average ROC-AUC  : 0.8707
 
-(None Attention)
+(None Attention) - old but lower still
   Average Accuracy : 0.6686
   Average F1 Score : 0.6569
   Average ROC-AUC  : 0.8234

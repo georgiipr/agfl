@@ -38,7 +38,7 @@ class EEGNet(nn.Module):
         )
         
         if self.attention_type == 'agfl':
-            self.attn_blocks = nn.ModuleList([AGFL(dim=f2, heads=4, K=3, separate_W=True)])
+            self.attn_blocks = nn.ModuleList([AGFL(dim=f2, heads=4, K=2, separate_W=True)])
         elif self.attention_type == 'standard':
             self.attn_blocks = nn.ModuleList([StandardAttention(dim=f2, heads=4)])
         else:

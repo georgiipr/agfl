@@ -1,6 +1,8 @@
 import os
+import copy
 from datetime import datetime
 import numpy as np
+import torch
 
 from data_loaders.BCIDataset import get_eeg_dataloaders
 from models.eegnet import EEGNet
@@ -48,34 +50,116 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
     
     model_factory = MODEL_REGISTRY[model_key]
 
-    all_acc, all_f1, all_auc = [], [], []
+    # --- MEMORY STORAGE FOR MULTI-PHASE TRAINING ---
+    dataloaders = {}       # Maps subject_id -> (train_loader, val_loader)
+    models = {}            # Maps subject_id -> trained_model
+    initial_metrics = {}   # Maps subject_id -> dict of acc, f1, auc, history
 
-    print(f"  Starting Subject-Dependent Pipeline ")
+    print(f"  Starting Two-Phase Subject-Dependent Pipeline ")
     print(f"  Model: {display_name}")
 
+    # ========================================================
+    # PHASE 1: INITIAL TRAINING FOR ALL SUBJECTS
+    # ========================================================
+    print("\n" + "="*50)
+    print(" PHASE 1: INITIAL TRAINING (ALL SUBJECTS)")
+    print("="*50)
+    
     for subject_id in range(1, 10):
-        print(f"\n>>> Processing Subject {subject_id}/9")
+        print(f"\n>>> Initial Training Subject {subject_id}/9")
         
+        # Load and store data
+        train_loader, val_loader = get_eeg_dataloaders(data_dir=data_dir, subject_id=subject_id, batch_size=64)
+        dataloaders[subject_id] = (train_loader, val_loader)
+
+        # Initialize and train model
+        model = model_factory(mode, num_classes_global, 22).to(device)
+        acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=250)
+        
+        # Save states
+        models[subject_id] = model
+        initial_metrics[subject_id] = {'acc': acc, 'f1': f1, 'auc': auc, 'history': history}
+
+        print(f"Subject {subject_id} Initial Acc: {acc:.4f} | F1: {f1:.4f}")
+
+    # ========================================================
+    # PHASE 2: TRIAGE (IDENTIFY DONORS AND RECIPIENTS)
+    # ========================================================
+    print("\n" + "="*50)
+    print(" PHASE 2: EVALUATION & TRIAGE")
+    print("="*50)
+
+    # Calculate median accuracy to separate Good and Bad models
+    accuracies = [initial_metrics[sid]['acc'] for sid in range(1, 10)]
+    threshold = np.median(accuracies)
+
+    good_subjects = [sid for sid in range(1, 10) if initial_metrics[sid]['acc'] >= threshold]
+    bad_subjects = [sid for sid in range(1, 10) if initial_metrics[sid]['acc'] < threshold]
+
+    print(f"Median Accuracy Threshold: {threshold:.4f}")
+    print(f"Donor Subjects (Good): {good_subjects}")
+    print(f"Recipient Subjects (Bad): {bad_subjects}")
+
+    final_metrics = copy.deepcopy(initial_metrics)
+
+    # ========================================================
+    # PHASE 3 & 4: KNOWLEDGE TRANSFER & FINE-TUNING
+    # ========================================================
+    if len(good_subjects) > 0 and len(bad_subjects) > 0:
+        print("\n" + "="*50)
+        print(" PHASE 3 & 4: KNOWLEDGE TRANSFER & FINE-TUNING")
+        print("="*50)
+        
+        # Create Average Donor State Dict
+        donor_state = copy.deepcopy(models[good_subjects[0]].state_dict())
+        for key in donor_state:
+            for sid in good_subjects[1:]:
+                donor_state[key] += models[sid].state_dict()[key]
+            
+            # Divide to get average. (Check float vs long to avoid PyTorch errors on BatchNorm variables)
+            if donor_state[key].is_floating_point():
+                donor_state[key] = donor_state[key] / len(good_subjects)
+            else:
+                donor_state[key] = donor_state[key] // len(good_subjects)
+
+        # Apply and Fine-Tune Bad Models
+        for bad_sid in bad_subjects:
+            print(f"\n>>> Fine-Tuning Subject {bad_sid} with Donor Weights...")
+            model = models[bad_sid]
+            model.load_state_dict(donor_state)
+
+            train_loader, val_loader = dataloaders[bad_sid]
+
+            # FINE TUNE: Drop epochs to 50 and learning rate to 1e-4 so we don't break the donor weights!
+            acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=50, lr=1e-4)
+
+            # Update with new metrics
+            final_metrics[bad_sid] = {'acc': acc, 'f1': f1, 'auc': auc, 'history': history}
+            print(f"Subject {bad_sid} New Acc: {acc:.4f} (was {initial_metrics[bad_sid]['acc']:.4f})")
+
+    print("\n" + "="*50)
+    print(" PHASE 5: FINAL PLOTTING & REPORTING")
+    print("="*50)
+
+    all_final_acc, all_final_f1, all_final_auc = [], [], []
+
+    for subject_id in range(1, 10):
+        print(f"Generating artifacts for Subject {subject_id}...")
         subj_save_path = os.path.join(base_save_path, f"Subject_{subject_id}")
         os.makedirs(subj_save_path, exist_ok=True)
 
-        train_loader, val_loader = get_eeg_dataloaders(data_dir=data_dir, subject_id=subject_id, batch_size=64)
+        model = models[subject_id]
+        train_loader, val_loader = dataloaders[subject_id]
+        metrics = final_metrics[subject_id]
 
-        model = model_factory(mode, num_classes_global, 22).to(device)
-        
-        acc, f1, auc, history = train_eval_eeg(model, train_loader, val_loader, device, epochs=250)
-        
-        all_acc.append(acc)
-        all_f1.append(f1)
-        all_auc.append(auc)
-
-        print(f"Subject {subject_id} Results:")
-        print(f"  Accuracy : {acc:.4f}")
-        print(f"  F1 (Macro): {f1:.4f}")
-        print(f"  ROC-AUC  : {auc:.4f}")
+        all_final_acc.append(metrics['acc'])
+        all_final_f1.append(metrics['f1'])
+        all_final_auc.append(metrics['auc'])
 
         models_dict = {display_name: model}
-        plot_training_curves(history, display_name, subj_save_path)
+        
+        # Extract evaluation logic exactly as you had it initially
+        plot_training_curves(metrics['history'], display_name, subj_save_path)
 
         x_vis, y_vis = next(iter(val_loader))
         x_vis_dev = x_vis.to(device)
@@ -130,11 +214,11 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global):
             fs=250.0
         )
 
-    avg_acc = np.mean(all_acc)
-    avg_f1 = np.mean(all_f1)
-    avg_auc = np.mean(all_auc)
+    avg_acc = np.mean(all_final_acc)
+    avg_f1 = np.mean(all_final_f1)
+    avg_auc = np.mean(all_final_auc)
 
-    print(f"Final averaged results:")
+    print(f"\nFinal averaged results (Post-Transfer Phase):")
     print(f"  Average Accuracy : {avg_acc:.4f}")
     print(f"  Average F1 Score : {avg_f1:.4f}")
     print(f"  Average ROC-AUC  : {avg_auc:.4f}")
