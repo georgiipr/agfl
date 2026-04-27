@@ -3,7 +3,7 @@ import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
 
-from depricated.agfl_layer_0 import AGFL
+from agfl_layer import AGFL
 from standard_attention import StandardAttention
 
 class SpikingEEGNet(nn.Module):
