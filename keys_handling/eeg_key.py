@@ -4,8 +4,6 @@ import numpy as np
 
 from data_loaders.BCIDataset import get_eeg_dataloaders
 from models.eegnet import EEGNet
-from models.eegencoder import EEGEncoder
-from models.dsts_eeg_encoder import DSTSEEGEncoder
 from trainers.eeg_trainer import train_eval_eeg
 from plots.eeg_plots import (
     plot_training_curves, plot_layer_heatmaps_u,
