@@ -13,43 +13,49 @@ def bandpass_eeg_signal(data, fs=250.0, lowcut=2.0, highcut=30.0):
     b, a = butter(4, [low, high], btype='band')
     return filtfilt(b, a, data, axis=-1)
 
-def delta_modulation_encode(signal, threshold=0.5):
+def delta_sigma_encode(signal, delta=0.3):
     """
-    Converts continuous EEG into discrete spike trains using Delta Modulation.
+    Converts continuous EEG into a dual-coded spike tensor using 
+    Hybrid Delta-Sigma (change-based) and Stochastic Rate Modulation.
     Inputs:
         signal: numpy array of shape (Channels, Time)
-        threshold: float, the change required to trigger a spike
+        delta: float, step parameter for the Delta-Sigma modulation (default: 0.3 as per paper)
     Outputs:
-        spikes: numpy array of shape (Channels * 2, Time) - UP and DOWN spikes
+        spikes: numpy array of shape (Channels * 2, Time)
     """
     channels, time_steps = signal.shape
-    spikes = np.zeros((channels * 2, time_steps), dtype=np.float32)
     
-    base = signal[:, 0].copy()
+    # 1. Delta-Sigma modulation
+    s_ds = np.zeros((channels, time_steps), dtype=np.float32)
+    r = np.zeros(channels, dtype=np.float32)  # Initialize adaptive reference
     
-    for t in range(1, time_steps):
-        diff = signal[:, t] - base
+    for t in range(time_steps):
+        x_t = signal[:, t]
+        # Spike occurs if current signal > adaptive reference
+        s_t = (x_t > r).astype(np.float32)
+        s_ds[:, t] = s_t
+        # Update adaptive reference: r(t+1) = r(t) + s(t) - delta
+        r = r + s_t - delta
         
-        # Determine where signal increased or decreased beyond threshold
-        pos_spikes = diff >= threshold
-        neg_spikes = diff <= -threshold
-        
-        # Record spikes (Channel 0-21 for UP, 22-43 for DOWN)
-        spikes[:channels, t] = pos_spikes
-        spikes[channels:, t] = neg_spikes
-        
-        base[pos_spikes] += threshold
-        base[neg_spikes] -= threshold
-        
+    # 2. Stochastic Rate Coding
+    # Calculate probability: p(t) = 1 / (1 + exp(-x(t)))
+    p_t = 1.0 / (1.0 + np.exp(-signal))
+    
+    # Generate spikes based on Bernoulli distribution: b(t) ~ Bernoulli(p(t))
+    s_rate = (np.random.rand(channels, time_steps) < p_t).astype(np.float32)
+    
+    # 3. Concatenate both representations along the channel axis
+    spikes = np.concatenate([s_ds, s_rate], axis=0)
+    
     return spikes
 
 class BCI2aDataset(Dataset):
-    def __init__(self, data_dir, subjects, is_train=True, is_snn=False, spike_threshold=0.5):
+    def __init__(self, data_dir, subjects, is_train=True, is_snn=False, delta=0.3):
         self.samples = []
         self.labels = []
         self.is_train = is_train
         self.is_snn = is_snn
-        self.spike_threshold = spike_threshold
+        self.delta = delta
         suffix = 'T' if is_train else 'E'
         
         for subj in subjects:
@@ -99,7 +105,7 @@ class BCI2aDataset(Dataset):
                 trial_data = (trial_data - t_mean) / t_std
                 
                 if self.is_snn:
-                    trial_data = delta_modulation_encode(trial_data, threshold=self.spike_threshold)
+                    trial_data = delta_sigma_encode(trial_data, delta=self.delta)
                 
                 self.samples.append(trial_data)
                 self.labels.append(label)
@@ -115,13 +121,13 @@ class BCI2aDataset(Dataset):
             
         return x, y
 
-def get_eeg_dataloaders(data_dir="./ml", subject_id=1, batch_size=64, is_snn=False, spike_threshold=0.5):
+def get_eeg_dataloaders(data_dir="./ml", subject_id=1, batch_size=64, is_snn=False, delta=0.3):
     full_dataset = BCI2aDataset(
         data_dir, 
         subjects=[subject_id], 
         is_train=True, 
         is_snn=is_snn,
-        spike_threshold=spike_threshold
+        delta=delta
     )
     
     total_samples = len(full_dataset)

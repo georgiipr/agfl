@@ -8,69 +8,94 @@ from standard_attention import StandardAttention
 
 class SpikingEEGNet(nn.Module):
     def __init__(self, num_channels=44, num_classes=4, samples=1000, 
-                 f1=16, f2=32, attention_type='standard', 
-                 dropout_rate=0.5, beta=0.9):
+                 attention_type='standard', dropout_rate=0.5, beta=0.9):
         super(SpikingEEGNet, self).__init__()
         
         self.attention_type = attention_type
         self.samples = samples
         
-        # surrogate gradient allows backpropagation through non-differentiable spikes
         spike_grad = surrogate.fast_sigmoid(slope=25)
         
-        self.conv1 = nn.Conv1d(1, f1, kernel_size=num_channels, bias=False)
-        self.lif1 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        self.cnn = nn.Sequential(
+            nn.Conv1d(num_channels, 32, kernel_size=17, padding=8, bias=False),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2),
+            
+            nn.Conv1d(32, 64, kernel_size=17, padding=8, bias=False),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2),
+            
+            nn.Conv1d(64, 64, kernel_size=17, padding=8, bias=False),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2)
+        )
         
-        self.conv2 = nn.Conv1d(f1, f2, kernel_size=1, bias=False)
-        self.lif2 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        self.lif_input = snn.Leaky(beta=beta, spike_grad=spike_grad)
         
         self.dropout = nn.Dropout(dropout_rate)
         
-        #attention options - refer to agfl_layer.py and standard_attention.py
         if self.attention_type == 'agfl':
-            self.attn_blocks = nn.ModuleList([AGFL(dim=f2, heads=4, K=2, separate_W=True)])
+            self.attn_blocks = nn.ModuleList([AGFL(dim=64, heads=4, K=2, separate_W=True)])
         elif self.attention_type == 'standard':
-            self.attn_blocks = nn.ModuleList([StandardAttention(dim=f2, heads=4)])
+            self.attn_blocks = nn.ModuleList([StandardAttention(dim=64, heads=4)])
         else:
             self.attn_blocks = None
             
-        self.fc = nn.Linear(f2, num_classes)
+        self.lif_attn = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        
+        self.ffn = nn.Sequential(
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64)
+        )
+        self.lif_ffn = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        
+        self.fc = nn.Linear(64, num_classes)
 
     def forward(self, x):
-        # expect shapes: (Batch, Channels=44 - since 22 x 2 channels, Time=1000)
-        batch_size, _, time_steps = x.size()
+        x = self.cnn(x)
         
-        #  membrabe potentials for the sequence
-        mem1 = self.lif1.init_leaky()
-        mem2 = self.lif2.init_leaky()
+        batch_size, channels, time_steps = x.size()
         
+        mem_input = self.lif_input.init_leaky()
         spk_record = []
         
         for t in range(time_steps):
-            x_t = x[:, :, t].unsqueeze(1)
+            cur = x[:, :, t]
+            spk, mem_input = self.lif_input(cur, mem_input)
+            spk_record.append(spk)
             
-            cur1 = self.conv1(x_t)
-            spk1, mem1 = self.lif1(cur1, mem1)
-            
-            cur2 = self.conv2(spk1)
-            spk2, mem2 = self.lif2(cur2, mem2)
-            
-            spk2 = self.dropout(spk2)
-            spk_record.append(spk2)
-            
-        spk_seq = torch.stack(spk_record, dim=-1).squeeze(2)
-        
-        spk_seq = spk_seq.transpose(1, 2)
+        spk_seq = torch.stack(spk_record, dim=1)
         
         if self.attn_blocks is not None:
             L = len(self.attn_blocks)
+            attn_out = spk_seq
+            
             for i, block in enumerate(self.attn_blocks):
                 if self.attention_type == 'agfl':
-                    spk_seq = block(spk_seq, layer_idx=i, L=L)
+                    attn_out = block(attn_out, layer_idx=i, L=L)
                 else:
-                    spk_seq = block(spk_seq)
+                    attn_out = block(attn_out)
                     
-        # receive a single vector per batch via polling
+            mem_attn = self.lif_attn.init_leaky()
+            mem_ffn = self.lif_ffn.init_leaky()
+            smha_record = []
+            
+            for t in range(time_steps):
+                cur_attn = attn_out[:, t, :]
+                spk_attn, mem_attn = self.lif_attn(cur_attn, mem_attn)
+                
+                cur_ffn = self.ffn(spk_attn)
+                spk_ffn, mem_ffn = self.lif_ffn(cur_ffn, mem_ffn)
+                
+                spk_ffn = self.dropout(spk_ffn)
+                smha_record.append(spk_ffn)
+                
+            spk_seq = torch.stack(smha_record, dim=1)
+            
         pooled = spk_seq.mean(dim=1) 
         
         out = self.fc(pooled)

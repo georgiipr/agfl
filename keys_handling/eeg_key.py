@@ -4,7 +4,7 @@ import numpy as np
 
 from data_loaders.BCIDataset import get_eeg_dataloaders
 from models.eegnet import EEGNet
-from models.snn import SpikingEEGNet
+from models.old_snn import SpikingEEGNet
 from trainers.eeg_trainer import train_eval_eeg
 from plots.eeg_plots import (
     plot_training_curves, plot_layer_heatmaps_u,
@@ -21,12 +21,6 @@ BCI2A_CH_NAMES = [
 MODEL_REGISTRY = {
     "eegnet": lambda mode, cls, ch: EEGNet(
         attention_type=mode, num_classes=cls, num_channels=ch
-    ),
-    "eegencoder": lambda mode, cls, ch: EEGEncoder(
-        attention_type=mode, n_classes=cls, in_chans=ch
-    ),
-    "dstseegencoder": lambda mode, cls, ch: DSTSEEGEncoder(
-        attention_type=mode, num_classes=cls, num_channels=ch, K=1
     ),
     "snn": lambda mode, cls, ch: SpikingEEGNet(
         attention_type=mode, num_classes=cls, num_channels=ch
