@@ -63,6 +63,7 @@ class SpikingEEGNet(nn.Module):
         self.lif_out = snn.Leaky(beta=1.0, reset_mechanism="none")
 
     def forward(self, x):
+        syn1 = self.pool1(self.bn1(self.conv1(x)))
         mem1 = self.lif1.init_leaky()
         spk1_record = []
         
@@ -95,7 +96,6 @@ class SpikingEEGNet(nn.Module):
         if self.attn_blocks is not None:
             L = len(self.attn_blocks)
             attn_out = spk_seq
-            
             for i, block in enumerate(self.attn_blocks):
                 if self.attention_type == 'agfl':
                     attn_out = block(attn_out, layer_idx=i, L=L)
@@ -119,10 +119,10 @@ class SpikingEEGNet(nn.Module):
                 
                 smha_record.append(spk_ffn2)
                 
-            spk_seq = torch.stack(smha_record, dim=1)
+            spk_seq = torch.stack(smha_record, dim=1) # [batch, time, features]
             
-
         fc_out = self.fc(spk_seq)
+        
         mem_out = self.lif_out.init_leaky()
         
         for t in range(spk_seq.size(1)):

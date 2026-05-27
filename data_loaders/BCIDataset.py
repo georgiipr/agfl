@@ -62,7 +62,7 @@ class BCI2aDataset(Dataset):
             inv_event_dict = {v: k for k, v in event_dict.items()}
             
             offset = int(0.5 * 250)
-            max_window_size = int(4.0 * 250)
+            max_window_size = int(3.5 * 250)
             
             for event in events:
                 start_idx = event[0]
