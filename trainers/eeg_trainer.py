@@ -16,10 +16,15 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        
         pt = torch.exp(-ce_loss) 
+        
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
         
+        if self.weight is not None:
+            focal_loss = focal_loss * self.weight[targets]
+            
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
@@ -28,9 +33,17 @@ class FocalLoss(nn.Module):
             return focal_loss
 
 def compute_class_weights(train_loader, device):
-    all_labels = []
-    for _, y in train_loader:
-        all_labels.extend(y.numpy())
+    dataset = train_loader.dataset
+    
+    if isinstance(dataset, torch.utils.data.Subset) and hasattr(dataset.dataset, 'labels'):
+        all_labels = [dataset.dataset.labels[i] for i in dataset.indices]
+    elif hasattr(dataset, 'labels'):
+        all_labels = dataset.labels
+    else:
+        all_labels = []
+        for batch in train_loader:
+            y = batch[1] 
+            all_labels.extend(y.numpy())
     
     all_labels = np.array(all_labels)
     class_counts = np.bincount(all_labels)
@@ -38,7 +51,6 @@ def compute_class_weights(train_loader, device):
     num_classes = len(class_counts)
     
     weights = total_samples / (num_classes * class_counts)
-    
     return torch.tensor(weights, dtype=torch.float32).to(device)
 
 
@@ -49,7 +61,7 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3,
     opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3) 
     class_weights = compute_class_weights(train_loader, device)
     
-    loss_fn = FocalLoss(weight=class_weights, gamma=3.0)
+    loss_fn = FocalLoss(weight=class_weights, gamma=2.0)
     
     warmup_epochs = 10
     warmup_scheduler = LinearLR(opt, start_factor=0.1, total_iters=warmup_epochs)
@@ -64,16 +76,19 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3,
     
     pbar = tqdm.tqdm(range(epochs), desc="Training Model", unit="epoch")
     
+    use_amp = (device_type == 'cuda' and not is_snn)
+    
     for epoch in pbar:
         model.train()
         epoch_loss = 0.0
         
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for batch in train_loader:
+            x = batch[0].to(device, non_blocking=True)
+            y = batch[1].to(device, non_blocking=True)
             
             opt.zero_grad()
             
-            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=(device_type == 'cuda')):
+            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=use_amp):
                 logits = model(x)
                 loss = loss_fn(logits, y)
 
@@ -98,9 +113,11 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3,
         val_preds, val_targets = [], []
         
         with torch.no_grad():
-            for x_val, y_val in val_loader:
-                x_val = x_val.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=(device_type == 'cuda')):
+            for batch_val in val_loader:
+                x_val = batch_val[0].to(device, non_blocking=True)
+                y_val = batch_val[1]
+                
+                with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=use_amp):
                     logits_val = model(x_val)
                     
                 val_preds.extend(logits_val.argmax(-1).cpu().numpy())
@@ -129,9 +146,11 @@ def train_eval_eeg(model, train_loader, val_loader, device, epochs=250, lr=5e-3,
     preds, targets, probs = [], [], []
 
     with torch.no_grad():
-        for x, y in val_loader:
-            x = x.to(device)
-            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=(device_type == 'cuda')):
+        for batch in val_loader:
+            x = batch[0].to(device, non_blocking=True)
+            y = batch[1]
+            
+            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=use_amp):
                 logits = model(x)
                 
             preds.extend(logits.argmax(-1).cpu().numpy())

@@ -342,3 +342,40 @@ def plot_c3_c4_stft(X, y, ch_names, save_path, fs=250.0):
     plt.suptitle('Time-Frequency Response (STFT) - Watch for ERD (8-30 Hz)', fontsize=14, fontweight='bold', y=0.92)
     plt.savefig(os.path.join(save_path, "stft_c3_c4.png"), dpi=300, bbox_inches='tight')
     plt.close(fig)
+
+def plot_raw_vs_spikes(x_raw, x_spike, ch_names, ch_to_plot, save_path, fs=250.0):
+    if torch.is_tensor(x_raw): x_raw = x_raw.cpu().numpy()
+    if torch.is_tensor(x_spike): x_spike = x_spike.cpu().numpy()
+    
+    ch_idx = ch_names.index(ch_to_plot) if ch_to_plot in ch_names else 0
+    num_channels = len(ch_names)
+    
+    raw_sig = x_raw[ch_idx, :]
+    spike_up = x_spike[ch_idx, :]
+    spike_down = x_spike[ch_idx + num_channels, :]
+    
+    time = np.arange(len(raw_sig)) / fs
+    
+    fig, axs = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    
+    axs[0].plot(time, raw_sig, color='#1f77b4', linewidth=1.2, label='Normalized EEG')
+    axs[0].set_ylabel('Amplitude (z-score)', fontsize=11)
+    axs[0].set_title(f'Continuous Raw EEG vs. Delta Modulation Spikes (Channel {ch_to_plot})', fontsize=13, fontweight='bold')
+    axs[0].grid(True, linestyle='--', alpha=0.5)
+    axs[0].legend(loc='upper right')
+    
+    up_times = time[spike_up == 1.0]
+    down_times = time[spike_down == 1.0]
+    
+    axs[1].vlines(up_times, 0.1, 1.0, colors='#2ca02c', linewidth=1.2, label='Spike UP (+)')
+    axs[1].vlines(down_times, -1.0, -0.1, colors='#d62728', linewidth=1.2, label='Spike DOWN (-)')
+    
+    axs[1].set_ylim(-1.4, 1.4)
+    axs[1].set_ylabel('Spike Event State', fontsize=11)
+    axs[1].set_xlabel('Time (seconds)', fontsize=11)
+    axs[1].grid(True, linestyle='--', alpha=0.5)
+    axs[1].legend(loc='upper right')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, f"raw_vs_spikes_{ch_to_plot}.png"), dpi=300)
+    plt.close(fig)

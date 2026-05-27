@@ -38,21 +38,3 @@ note: state off means standard MultiHeaded attention is being used, None - no at
 Note: eeg uses BCI2a IV Competition dataset (.gdf): Zip can be downloaded from this link: https://www.bbci.de/competition/iv/download/index.html?agree=yes&submit=Submit
 
 (To ensure it works, put uploaded files into the ml folder in the same directory where this project is located)\
-
-
-```
-Results:
-
-EEGNet:
-(Standard attention)
-  Average Accuracy : 0.7299
-  Average F1 Score : 0.7204
-  Average ROC-AUC  : 0.8650
-
-(AGFL Attention)
-  Average Accuracy : 0.7663
-  Average F1 Score : 0.7626
-  Average ROC-AUC  : 0.8707
-
-```
-

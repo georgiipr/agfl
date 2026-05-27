@@ -13,7 +13,7 @@ def bandpass_eeg_signal(data, fs=250.0, lowcut=2.0, highcut=30.0):
     b, a = butter(4, [low, high], btype='band')
     return filtfilt(b, a, data, axis=-1)
 
-def standard_delta_modulation(signal, threshold=0.5):
+def standard_delta_modulation(signal, threshold=0.2):
     channels, time_steps = signal.shape
     spikes_up = np.zeros_like(signal)
     spikes_down = np.zeros_like(signal)
@@ -36,6 +36,7 @@ def standard_delta_modulation(signal, threshold=0.5):
 class BCI2aDataset(Dataset):
     def __init__(self, data_dir, subjects, is_train=True, is_snn=False, threshold=0.5):
         self.samples = []
+        self.raw_samples = []  # Added to track unspiked signals for visualization
         self.labels = []
         self.is_train = is_train
         self.is_snn = is_snn
@@ -70,13 +71,13 @@ class BCI2aDataset(Dataset):
                 event_code = inv_event_dict.get(event_id, '')
                 
                 if event_code == '769':
-                    label = 0  # Left Hand
+                    label = 0
                 elif event_code == '770':
-                    label = 1  # Right Hand
+                    label = 1
                 elif event_code == '771':
-                    label = 2  # Foot
+                    label = 2
                 elif event_code == '772':
-                    label = 3  # Tongue
+                    label = 3
                 else:
                     continue 
                     
@@ -88,9 +89,12 @@ class BCI2aDataset(Dataset):
                 trial_data = X_cont[:, actual_start : actual_start + max_window_size]
                 
                 if self.is_snn:
-                    trial_data = standard_delta_modulation(trial_data, threshold=self.threshold)
+                    spiked_data = standard_delta_modulation(trial_data, threshold=self.threshold)
+                    self.samples.append(spiked_data)
+                    self.raw_samples.append(trial_data)
+                else:
+                    self.samples.append(trial_data)
                 
-                self.samples.append(trial_data)
                 self.labels.append(label)
 
     def __len__(self):
@@ -99,8 +103,12 @@ class BCI2aDataset(Dataset):
     def __getitem__(self, idx):
         x = torch.from_numpy(self.samples[idx]).float()
         y = torch.tensor(self.labels[idx], dtype=torch.long)
-        
         x = x[:, :1000]
+            
+        if self.is_snn:
+            x_raw = torch.from_numpy(self.raw_samples[idx]).float()
+            x_raw = x_raw[:, :1000]
+            return x, y, x_raw  # Returns the raw tuple pack
             
         return x, y
 

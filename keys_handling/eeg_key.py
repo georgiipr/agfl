@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 import numpy as np
+import torch
 
 from data_loaders.BCIDataset import get_eeg_dataloaders
 from models.eegnet import EEGNet
@@ -10,7 +11,7 @@ from plots.eeg_plots import (
     plot_training_curves, plot_layer_heatmaps_u,
     plot_eeg_spatial_attention, plot_eeg_epoch, get_mne_info, 
     plot_spectrum_map_mne, plot_topographic_map_mne,
-    plot_csp_patterns, plot_c3_c4_stft
+    plot_csp_patterns, plot_c3_c4_stft, plot_raw_vs_spikes
 )
 
 BCI2A_CH_NAMES = [
@@ -42,7 +43,7 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global, t
     if model_key not in MODEL_REGISTRY:
         raise ValueError(f"Model '{model_name}' not found. Available models: {list(MODEL_REGISTRY.keys())}")
     
-    is_snn = (task_name == "nc" or model_key == "spikingeegnet")
+    is_snn = (task_name == "nc" or model_key == "spikingeegnet" or model_key == "snn")
     
     model_factory = MODEL_REGISTRY[model_key]
 
@@ -84,67 +85,80 @@ def run_eeg(device, PROJECT_ROOT, model_name, agfl_status, num_classes_global, t
         models_dict = {display_name: model}
         plot_training_curves(history, display_name, subj_save_path)
 
-        x_vis, y_vis = next(iter(val_loader))
-        x_vis_dev = x_vis.to(device)
+        batch_vis = next(iter(val_loader))
+        if len(batch_vis) == 3:
+            x_vis, y_vis, x_raw_vis = batch_vis
+        else:
+            x_vis, y_vis = batch_vis
+            x_raw_vis = x_vis
 
+        x_vis_dev = x_vis.to(device)
         plot_layer_heatmaps_u(models_dict, x_vis_dev, subj_save_path)
         plot_eeg_spatial_attention(x_vis_dev, models_dict, subj_save_path) 
 
         x_single = x_vis[0]
         y_single = y_vis[0]
-        plot_eeg_epoch(x_single, subj_save_path, y_single, fs=250.0)
+        x_single_raw = x_raw_vis[0]
 
-        numpy_epoch = x_single.cpu().numpy()
+        plot_eeg_epoch(x_single_raw, subj_save_path, y_single, fs=250.0, channel_names=BCI2A_CH_NAMES)
+
+        numpy_raw_epoch = x_single_raw.cpu().numpy()
         
-        if not is_snn:
-            plot_spectrum_map_mne(
-                epoch_data=numpy_epoch, 
-                ch_names=BCI2A_CH_NAMES, 
-                save_path=subj_save_path, 
-                fs=250.0
-            )
-            
-            plot_topographic_map_mne(
-                epoch_data=numpy_epoch, 
-                ch_names=BCI2A_CH_NAMES, 
-                save_path=subj_save_path, 
-                fs=250.0, 
-                title=f"Epoch Power Topomap (Class {y_single.item()})"
-            )
+        plot_spectrum_map_mne(
+            epoch_data=numpy_raw_epoch, 
+            ch_names=BCI2A_CH_NAMES, 
+            save_path=subj_save_path, 
+            fs=250.0
+        )
+        
+        plot_topographic_map_mne(
+            epoch_data=numpy_raw_epoch, 
+            ch_names=BCI2A_CH_NAMES, 
+            save_path=subj_save_path, 
+            fs=250.0, 
+            title=f"Epoch Power Topomap (Class {y_single.item()})"
+        )
 
-            all_x, all_y = [], []
-            for i, (xb, yb) in enumerate(val_loader):
-                all_x.append(xb.cpu().numpy())
-                all_y.append(yb.cpu().numpy())
-                if i >= 3:
-                    break
-                    
-            X_multitrial = np.concatenate(all_x, axis=0)
-            Y_multitrial = np.concatenate(all_y, axis=0)
+        all_x_raw, all_y = [], []
+        for i, batch_b in enumerate(val_loader):
+            if len(batch_b) == 3:
+                _, yb, xrb = batch_b
+                all_x_raw.append(xrb.cpu().numpy())
+            else:
+                xb, yb = batch_b
+                all_x_raw.append(xb.cpu().numpy())
+            all_y.append(yb.cpu().numpy())
+            if i >= 3:
+                break
+                
+        X_multitrial_raw = np.concatenate(all_x_raw, axis=0)
+        Y_multitrial = np.concatenate(all_y, axis=0)
 
-            plot_csp_patterns(
-                X=X_multitrial, 
-                y=Y_multitrial, 
-                ch_names=BCI2A_CH_NAMES, 
-                save_path=subj_save_path, 
-                fs=250.0
-            )
+        plot_csp_patterns(
+            X=X_multitrial_raw, 
+            y=Y_multitrial, 
+            ch_names=BCI2A_CH_NAMES, 
+            save_path=subj_save_path, 
+            fs=250.0
+        )
 
-            plot_c3_c4_stft(
-                X=X_multitrial, 
-                y=Y_multitrial, 
-                ch_names=BCI2A_CH_NAMES, 
-                save_path=subj_save_path, 
-                fs=250.0
-            )
-        else:
-            print("skipping")
+        plot_c3_c4_stft(
+            X=X_multitrial_raw, 
+            y=Y_multitrial, 
+            ch_names=BCI2A_CH_NAMES, 
+            save_path=subj_save_path, 
+            fs=250.0
+        )
+
+        if is_snn:
+            plot_raw_vs_spikes(x_single_raw, x_single, BCI2A_CH_NAMES, 'C3', subj_save_path, fs=250.0)
+            plot_raw_vs_spikes(x_single_raw, x_single, BCI2A_CH_NAMES, 'C4', subj_save_path, fs=250.0)
 
     avg_acc = np.mean(all_acc)
     avg_f1 = np.mean(all_f1)
     avg_auc = np.mean(all_auc)
 
-    print(f"Final averaged results:")
+    print(f"\nFinal averaged results:")
     print(f"  Average Accuracy : {avg_acc:.4f}")
     print(f"  Average F1 Score : {avg_f1:.4f}")
     print(f"  Average ROC-AUC  : {avg_auc:.4f}")
