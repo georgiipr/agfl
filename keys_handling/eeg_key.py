@@ -4,7 +4,7 @@ import numpy as np
 
 from data_loaders.BCIDataset import get_eeg_dataloaders
 from models.eegnet import EEGNet
-from models.old_snn import SpikingEEGNet
+from models.snn import SpikingEEGNet
 from trainers.eeg_trainer import train_eval_eeg
 from plots.eeg_plots import (
     plot_training_curves, plot_layer_heatmaps_u,

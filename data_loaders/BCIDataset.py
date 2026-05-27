@@ -13,49 +13,33 @@ def bandpass_eeg_signal(data, fs=250.0, lowcut=2.0, highcut=30.0):
     b, a = butter(4, [low, high], btype='band')
     return filtfilt(b, a, data, axis=-1)
 
-def delta_sigma_encode(signal, delta=0.3):
-    """
-    Converts continuous EEG into a dual-coded spike tensor using 
-    Hybrid Delta-Sigma (change-based) and Stochastic Rate Modulation.
-    Inputs:
-        signal: numpy array of shape (Channels, Time)
-        delta: float, step parameter for the Delta-Sigma modulation (default: 0.3 as per paper)
-    Outputs:
-        spikes: numpy array of shape (Channels * 2, Time)
-    """
+def standard_delta_modulation(signal, threshold=0.5):
     channels, time_steps = signal.shape
+    spikes_up = np.zeros_like(signal)
+    spikes_down = np.zeros_like(signal)
     
-    # 1. Delta-Sigma modulation
-    s_ds = np.zeros((channels, time_steps), dtype=np.float32)
-    r = np.zeros(channels, dtype=np.float32)  # Initialize adaptive reference
+    ref = signal[:, 0].copy()
     
-    for t in range(time_steps):
-        x_t = signal[:, t]
-        # Spike occurs if current signal > adaptive reference
-        s_t = (x_t > r).astype(np.float32)
-        s_ds[:, t] = s_t
-        # Update adaptive reference: r(t+1) = r(t) + s(t) - delta
-        r = r + s_t - delta
+    for t in range(1, time_steps):
+        diff = signal[:, t] - ref
         
-    # 2. Stochastic Rate Coding
-    # Calculate probability: p(t) = 1 / (1 + exp(-x(t)))
-    p_t = 1.0 / (1.0 + np.exp(-signal))
-    
-    # Generate spikes based on Bernoulli distribution: b(t) ~ Bernoulli(p(t))
-    s_rate = (np.random.rand(channels, time_steps) < p_t).astype(np.float32)
-    
-    # 3. Concatenate both representations along the channel axis
-    spikes = np.concatenate([s_ds, s_rate], axis=0)
-    
-    return spikes
+        up_mask = diff >= threshold
+        spikes_up[up_mask, t] = 1.0
+        ref[up_mask] += threshold
+        
+        down_mask = diff <= -threshold
+        spikes_down[down_mask, t] = 1.0
+        ref[down_mask] -= threshold
+        
+    return np.concatenate([spikes_up, spikes_down], axis=0)
 
 class BCI2aDataset(Dataset):
-    def __init__(self, data_dir, subjects, is_train=True, is_snn=False, delta=0.3):
+    def __init__(self, data_dir, subjects, is_train=True, is_snn=False, threshold=0.5):
         self.samples = []
         self.labels = []
         self.is_train = is_train
         self.is_snn = is_snn
-        self.delta = delta
+        self.threshold = threshold
         suffix = 'T' if is_train else 'E'
         
         for subj in subjects:
@@ -70,6 +54,9 @@ class BCI2aDataset(Dataset):
             
             X_cont = raw.get_data()[:22, :].astype(np.float32)
             X_cont = bandpass_eeg_signal(X_cont, fs=250.0)
+            session_mean = X_cont.mean(axis=-1, keepdims=True)
+            session_std = X_cont.std(axis=-1, keepdims=True) + 1e-8
+            X_cont = (X_cont - session_mean) / session_std
             
             events, event_dict = mne.events_from_annotations(raw, verbose=False)
             inv_event_dict = {v: k for k, v in event_dict.items()}
@@ -80,7 +67,7 @@ class BCI2aDataset(Dataset):
             for event in events:
                 start_idx = event[0]
                 event_id = event[2]
-                event_code = inv_event_dict[event_id]
+                event_code = inv_event_dict.get(event_id, '')
                 
                 if event_code == '769':
                     label = 0  # Left Hand
@@ -100,12 +87,8 @@ class BCI2aDataset(Dataset):
                     
                 trial_data = X_cont[:, actual_start : actual_start + max_window_size]
                 
-                t_mean = trial_data.mean(axis=-1, keepdims=True)
-                t_std = trial_data.std(axis=-1, keepdims=True) + 1e-8
-                trial_data = (trial_data - t_mean) / t_std
-                
                 if self.is_snn:
-                    trial_data = delta_sigma_encode(trial_data, delta=self.delta)
+                    trial_data = standard_delta_modulation(trial_data, threshold=self.threshold)
                 
                 self.samples.append(trial_data)
                 self.labels.append(label)
@@ -121,13 +104,13 @@ class BCI2aDataset(Dataset):
             
         return x, y
 
-def get_eeg_dataloaders(data_dir="./ml", subject_id=1, batch_size=64, is_snn=False, delta=0.3):
+def get_eeg_dataloaders(data_dir="./ml", subject_id=1, batch_size=64, is_snn=False, threshold=0.5):
     full_dataset = BCI2aDataset(
         data_dir, 
         subjects=[subject_id], 
         is_train=True, 
         is_snn=is_snn,
-        delta=delta
+        threshold=threshold
     )
     
     total_samples = len(full_dataset)

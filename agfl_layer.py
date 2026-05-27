@@ -18,7 +18,8 @@ class GraphFilter(nn.Module):
         super().__init__()
         self.K = K
         self.separate_W = separate_W
-        self.alpha_logits = nn.Parameter(torch.zeros(K + 1))
+        
+        self.alpha_logits = nn.Parameter(torch.randn(K + 1) * 0.02)
         
         if separate_W:
             self.W = nn.ModuleList([
@@ -29,7 +30,7 @@ class GraphFilter(nn.Module):
             self.W = nn.Linear(dim, dim, bias=False)
 
     def forward(self, A, X):
-        alpha = self.alpha_logits
+        alpha = torch.softmax(self.alpha_logits, dim=0)
         
         P_k = X 
         if self.separate_W:
@@ -38,7 +39,7 @@ class GraphFilter(nn.Module):
             H = alpha[0] * self.W(P_k)
             
         for k in range(1, self.K + 1):
-            P_k = A @ P_k # A^k X
+            P_k = A @ P_k
             
             if self.separate_W:
                 proj = self.W[k](P_k)
@@ -50,10 +51,11 @@ class GraphFilter(nn.Module):
         return H
 
 class AGFL(nn.Module):
-    def __init__(self, dim, heads, K, separate_W=True):
+    def __init__(self, dim, heads, K, separate_W=True, causal=True):
         super().__init__()
         self.heads = heads
         self.dim_h = dim // heads
+        self.causal = causal
         
         self.builders = nn.ModuleList([
             GraphConstructor(self.dim_h)
@@ -63,6 +65,8 @@ class AGFL(nn.Module):
             GraphFilter(self.dim_h, K, separate_W)
             for _ in range(heads)
         ])
+        
+        self.ln = nn.LayerNorm(dim)
         self.proj = nn.Linear(dim, dim)
         self.last_adj = None
 
@@ -79,7 +83,14 @@ class AGFL(nn.Module):
             
             S = self.builders[h](Xh)
             
+            if self.causal:
+                mask = torch.triu(torch.full((N, N), float('-inf'), device=X.device), diagonal=1)
+                S = S + mask
+            
             A_dense = torch.softmax(S, dim=-1)
+            
+            if self.causal:
+                A_dense = torch.nan_to_num(A_dense, nan=0.0)
             
             outs.append(self.filters[h](A_dense, Xh))
             adjs.append(A_dense.detach())
@@ -88,4 +99,4 @@ class AGFL(nn.Module):
         
         out = torch.cat(outs, dim=-1)
 
-        return self.proj(out)
+        return self.proj(self.ln(out))
