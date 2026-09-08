@@ -1,0 +1,17 @@
+{
+  "model": "eegnet",
+  "dataset": "eeg",
+  "device": "cuda",
+  "output_dir": "results/paper-renormalized",
+  "attention": "agfl",
+  "attention_options": {
+    "projection": "qkv",
+    "filter_projection": "none",
+    "score_scaling": "sqrt_dim",
+    "agfl_variant": "renormalized",
+    "hop_normalization": "feature",
+    "coefficient_init": "lower_order",
+    "K": 2,
+    "top_k": 8
+  }
+}

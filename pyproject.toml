@@ -1,17 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "agfl"
-version = "0.1.0"
-description = "testing layer"
+version = "0.3.0"
+description = "Reproducible AGFL and attention comparisons for EEG and ECG"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "torch==2.2.2",
-    "wfdb==4.3.1",
-    "numpy==2.4.4",
-    "matplotlib==3.10.8",
-    "scikit-learn==1.8.0",
-    "scipy==1.17.1",
-    "tqdm==4.67.1",
-    "umap-learn==0.5.11",
-    "mne==1.12.1",
+    "torch>=2.5,<3",
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+    "scikit-learn>=1.4,<2",
+    "mne>=1.6,<2",
+    "wfdb>=4.1,<5",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+plots = ["matplotlib>=3.8,<4"]
+umap = ["umap-learn>=0.5,<1"]
+
+[project.scripts]
+agfl = "agfl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agfl*"]
+
+[tool.setuptools.package-data]
+"agfl.presets" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["real_data: requires the physiological recordings on the target machine"]

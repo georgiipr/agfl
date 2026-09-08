@@ -1,0 +1,36 @@
+{
+  "base": {
+    "dataset": "eeg",
+    "device": "cuda",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "data": {
+      "data_dir": "../ml"
+    },
+    "output_dir": "results/comparison-eeg",
+    "model": "eegnet",
+    "attention": "agfl"
+  },
+  "experiments": [
+    {
+      "attention": "agfl"
+    },
+    {
+      "attention": "mha"
+    },
+    {
+      "attention": "performer"
+    },
+    {
+      "attention": "linformer"
+    },
+    {
+      "attention": "nystromformer"
+    }
+  ]
+}

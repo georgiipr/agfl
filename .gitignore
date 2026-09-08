@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+
+# macOS folder metadata
+.DS_Store
+
+# Experiment artifacts and local caches
+results/
+splits/
+analysis/
+.pytest_cache/
+*.pt
+*.pth
+*.npz
+# Keep NPZ fixtures generated in temporary test directories, not in source.

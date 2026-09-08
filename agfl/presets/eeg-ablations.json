@@ -1,0 +1,105 @@
+{
+  "base": {
+    "model": "eegnet",
+    "dataset": "eeg",
+    "device": "cuda",
+    "output_dir": "results/ablations-eeg",
+    "attention": "agfl"
+  },
+  "experiments": [
+    {},
+    {
+      "attention_options": {
+        "top_k": 4
+      }
+    },
+    {
+      "attention_options": {
+        "top_k": 8
+      }
+    },
+    {
+      "attention_options": {
+        "top_k": 16
+      }
+    },
+    {
+      "attention_options": {
+        "top_k": null
+      }
+    },
+    {
+      "attention_options": {
+        "K": 0
+      }
+    },
+    {
+      "attention_options": {
+        "K": 1
+      }
+    },
+    {
+      "attention_options": {
+        "K": 2
+      }
+    },
+    {
+      "attention_options": {
+        "K": 3
+      }
+    },
+    {
+      "attention_options": {
+        "agfl_variant": "renormalized"
+      }
+    },
+    {
+      "attention_options": {
+        "graph_normalization": "row"
+      }
+    },
+    {
+      "attention_options": {
+        "graph_normalization": "symmetric"
+      }
+    },
+    {
+      "attention_options": {
+        "graph_normalization": "none"
+      }
+    },
+    {
+      "attention_options": {
+        "top_k_stage": "raw_scores"
+      }
+    },
+    {
+      "attention_options": {
+        "top_k_stage": "softmax",
+        "post_topk_renormalize": true
+      }
+    },
+    {
+      "attention_options": {
+        "top_k_stage": "softmax",
+        "post_topk_renormalize": false
+      }
+    },
+    {
+      "attention_options": {
+        "top_k_ties": "exact"
+      }
+    },
+    {
+      "attention_options": {
+        "coefficient_init": "uniform"
+      }
+    },
+    {
+      "attention_options": {
+        "coefficient_init": "uniform",
+        "learnable_coefficients": false
+      }
+    }
+  ]
+}

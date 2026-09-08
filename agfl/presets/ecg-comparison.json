@@ -1,0 +1,44 @@
+{
+  "base": {
+    "dataset": "ecg",
+    "device": "cuda",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "data": {
+      "data_dir": "../mit-bih-arrhythmia-database-1.0.0",
+      "lead": "MLII"
+    },
+    "training": {
+      "augmentation": {
+        "shift": 10,
+        "scale": 0.1,
+        "noise": 0.05
+      }
+    },
+    "output_dir": "results/comparison-ecg",
+    "model": "conformer",
+    "attention": "agfl"
+  },
+  "experiments": [
+    {
+      "attention": "agfl"
+    },
+    {
+      "attention": "mha"
+    },
+    {
+      "attention": "performer"
+    },
+    {
+      "attention": "linformer"
+    },
+    {
+      "attention": "nystromformer"
+    }
+  ]
+}
