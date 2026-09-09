@@ -36,7 +36,7 @@ def reset_run_artifacts(path):
     path = Path(path)
     # Remove completion first so an aborted replacement cannot be aggregated as
     # a completed old run with a new checkpoint or history.
-    for name in ('result.json', 'failure.json', 'history.json', 'checkpoint.pt',
+    for name in ('result.json', 'selection.json', 'failure.json', 'history.json', 'checkpoint.pt',
                  'predictions.npz', 'config.json', 'split.json'):
         (path / name).unlink(missing_ok=True)
         (path / (name + '.tmp')).unlink(missing_ok=True)

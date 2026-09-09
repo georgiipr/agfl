@@ -1,0 +1,52 @@
+{
+  "dataset": "eeg",
+  "model": "eegnet",
+  "attention": "agfl",
+  "device": "cuda",
+  "seeds": [0, 1, 2, 3, 4],
+  "data": {
+    "data_dir": "../ml",
+    "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "sessions": ["T"],
+    "normalization": "per_sample",
+    "filter_scope": "trial",
+    "lowcut": 2.0,
+    "highcut": 30.0,
+    "offset_seconds": 0.0,
+    "window": 1000,
+    "artifact_policy": "exclude"
+  },
+  "split": {"protocol": "stratified", "train": 0.6, "validation": 0.2, "test": 0.2},
+  "model_options": {
+    "attention_axis": "time",
+    "temp_kernel": 125,
+    "f1": 8,
+    "d": 2,
+    "f2": 16,
+    "pk1": 4,
+    "pk2": 8,
+    "dropout_rate": 0.5,
+    "attention_residual": true,
+    "attention_dropout": 0.1,
+    "batch_norm_momentum": 0.01,
+    "batch_norm_eps": 0.001,
+    "initialization": "xavier"
+  },
+  "training": {
+    "epochs": 250,
+    "batch_size": 32,
+    "optimizer": "adamw",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "loss": "cross_entropy",
+    "class_weights": "none",
+    "checkpoint_criterion": "loss",
+    "scheduler": "warmup_cosine",
+    "warmup_epochs": 10,
+    "min_lr_ratio": 0.01,
+    "gradient_clip": 1.0,
+    "early_stopping_patience": 60,
+    "early_stopping_min_epochs": 100
+  },
+  "output_dir": "results/eegnet-bci2a"
+}

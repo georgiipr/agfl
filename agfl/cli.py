@@ -29,6 +29,15 @@ def main(argv=None):
     _configuration_arguments(sweep)
     sweep.add_argument('--dry-run', action='store_true')
     sweep.add_argument('--skip-completed', action='store_true', help='Keep matching completed seeds; restart incomplete seeds')
+    tune = commands.add_parser('tune-eegnet', help='Validation-only EEGNet + AGFL search for four-class BCI IV 2a')
+    tune.add_argument('--data-dir', default='../ml', help='Directory containing A01T.gdf ... A09T.gdf')
+    tune.add_argument('--output-dir', default='results/eegnet-bci2a-search')
+    tune.add_argument('--subjects', type=int, nargs='+', default=list(range(1, 10)))
+    tune.add_argument('--seeds', type=int, nargs='+', default=list(range(5)))
+    tune.add_argument('--candidate', action='append', help='Select a named candidate; repeat to choose several (default: all five)')
+    tune.add_argument('--epochs', type=int, help='Override epoch budget, e.g. 2 for a separate smoke check')
+    tune.add_argument('--dry-run', action='store_true', help='Print configurations without loading recordings')
+    tune.add_argument('--restart', action='store_true', help='Retrain completed candidates too; otherwise resume matching completed runs')
     plan = commands.add_parser('plan', help='Show resolved settings and launch command without loading data')
     _configuration_arguments(plan)
     analysis = commands.add_parser('analyze')
@@ -84,6 +93,23 @@ def main(argv=None):
                      max_samples=args.max_samples, embedding=args.embedding, data_dir=args.data_dir,
                      labels_dir=args.labels_dir, data_path=args.data_path)
         print(f'Diagnostic plot index: {args.output_dir}/index.md')
+        return
+    if args.command == 'tune-eegnet':
+        from pathlib import Path
+        import shlex
+        from .models.eegnet.search import search_configs, run_search
+        configs = search_configs(args.data_dir, args.output_dir, args.subjects, args.seeds,
+                                 args.candidate, args.epochs)
+        if args.dry_run:
+            print(json.dumps(configs, indent=2))
+            return
+        fits = sum(len(config['seeds']) for experiments in configs.values() for config in experiments)
+        print(f'EEGNet + AGFL / BCI IV 2a: {fits} validation-only fits; then test only each subject/seed winner.', flush=True)
+        run_search(configs, restart=args.restart)
+        root = Path(args.output_dir).expanduser().resolve()
+        print(f'Overall selected accuracy and per-subject results: {root / "search_result.json"}')
+        print('Generate plots for the selected runs:')
+        print(f'python main.py analyze {shlex.quote(str(root / "selected"))} --output-dir {shlex.quote(str(root / "analysis"))} --plots')
         return
     document = read_config(args.config) if args.config else load_preset(args.preset) if args.preset else {}
     is_sweep = 'base' in document or 'experiments' in document

@@ -123,7 +123,7 @@ def test_interrupted_seed_restarts_without_stale_artifacts(tmp_path, monkeypatch
     directories = []
     def interrupted_run(self, resolved, bundle, split, run_dir):
         directories.append(run_dir)
-        for name in ('checkpoint.pt', 'history.json', 'predictions.npz', 'result.json', 'history.json.tmp'):
+        for name in ('checkpoint.pt', 'history.json', 'predictions.npz', 'result.json', 'selection.json', 'history.json.tmp'):
             (run_dir / name).write_text('interrupted output')
         (run_dir / 'notes.txt').write_text('keep my notes')
         raise interruption('stopped by test')
@@ -140,7 +140,7 @@ def test_interrupted_seed_restarts_without_stale_artifacts(tmp_path, monkeypatch
     def restarted_run(self, resolved, bundle, split, destination):
         assert destination == run_dir
         assert (destination / 'split.json').read_bytes() == saved_split
-        for name in ('checkpoint.pt', 'history.json', 'predictions.npz', 'result.json', 'failure.json', 'history.json.tmp'):
+        for name in ('checkpoint.pt', 'history.json', 'predictions.npz', 'result.json', 'selection.json', 'failure.json', 'history.json.tmp'):
             assert not (destination / name).exists(), name
         assert (destination / 'config.json').is_file()
         assert (destination / 'notes.txt').read_text() == 'keep my notes'

@@ -36,6 +36,15 @@ class Partition(Dataset):
     def __init__(self, bundle, indices, normalization=None, augmentation=None):
         self.bundle, self.indices = bundle, list(indices)
         self.normalization, self.augmentation = normalization, augmentation
+        self.recombine_segments = (augmentation or {}).get('recombine_segments', 0)
+        self.donor_pools = {}
+        if self.recombine_segments:
+            if self.recombine_segments > bundle.x.shape[-1]:
+                raise ValueError('Recombination needs at least one sample per segment')
+            # Pools contain only this Partition's indices, grouped by subject
+            # and class. Neither validation nor test can contribute a segment.
+            for i in self.indices:
+                self.donor_pools.setdefault((bundle.groups[i], int(bundle.y[i])), []).append(i)
 
     def __len__(self):
         return len(self.indices)
@@ -43,6 +52,14 @@ class Partition(Dataset):
     def __getitem__(self, index):
         i = self.indices[index]
         x = self.bundle.x[i].copy()
+        if self.recombine_segments and np.random.random() < self.augmentation['recombine_probability']:
+            pool = self.donor_pools[(self.bundle.groups[i], int(self.bundle.y[i]))]
+            edges = np.linspace(0, x.shape[-1], self.recombine_segments + 1, dtype=int)
+            for left, right in zip(edges[:-1], edges[1:]):
+                donor = int(np.random.choice(pool))
+                # The same donor supplies every channel of a segment, keeping
+                # its spatial pattern and original relative trial timing.
+                x[:, left:right] = self.bundle.x[donor, :, left:right]
         if self.normalization:
             x = (x - self.normalization['mean']) / self.normalization['std']
         if self.augmentation:
@@ -61,7 +78,7 @@ class Partition(Dataset):
         return torch.from_numpy(np.asarray(x, dtype=np.float32)), torch.tensor(self.bundle.y[i], dtype=torch.long)
 
 
-def make_loaders(bundle, split, config, seed):
+def make_loaders(bundle, split, config, seed, *, include_test=True):
     from .datasets import validate_split
     validate_split(bundle, split)
     if split.get('diagnostic_only'):
@@ -79,7 +96,8 @@ def make_loaders(bundle, split, config, seed):
     if options['augmentation']['shift'] >= bundle.metadata['samples']:
         raise ValueError('Augmentation shift must be shorter than the signal window')
     loaders = {}
-    for offset, name in enumerate(('train', 'validation', 'test')):
+    partitions = ('train', 'validation', 'test') if include_test else ('train', 'validation')
+    for offset, name in enumerate(partitions):
         partition = Partition(bundle, split[name], normalization, options['augmentation'] if name == 'train' else None)
         loaders[name] = DataLoader(
             partition, batch_size=options['batch_size'], shuffle=name == 'train',
@@ -135,7 +153,7 @@ def evaluate(model, loader, device, loss_fn=None):
     return metrics, targets, probabilities
 
 
-def run_training(config, bundle, split, run_dir):
+def run_training(config, bundle, split, run_dir, *, validation_only=False):
     from .models import get_model_spec
     run_dir = Path(run_dir)
     seed = config['seeds'][0]
@@ -149,7 +167,7 @@ def run_training(config, bundle, split, run_dir):
         raise ValueError('AMP is supported only for CUDA experiments')
     spec = get_model_spec(config['model'])
     model = spec.build(config['model_options'], bundle.metadata, config['attention'], config['attention_options']).to(device)
-    loaders, normalization = make_loaders(bundle, split, config, seed)
+    loaders, normalization = make_loaders(bundle, split, config, seed, include_test=not validation_only)
     options = config['training']
     counts = np.bincount(bundle.y[split['train']], minlength=bundle.metadata['num_classes'])
     if np.any(counts == 0):
@@ -214,7 +232,53 @@ def run_training(config, bundle, split, run_dir):
             write_json(run_dir / 'history.json', history)
             progress.set_postfix(loss=f'{loss_total / n:.4f}', train_acc=f'{correct / n:.1%}',
                                  val_acc=f"{validation['accuracy']:.1%}", refresh=False)
+            patience = options.get('early_stopping_patience', 0)
+            if (patience and epoch >= options.get('early_stopping_min_epochs', 0)
+                    and epoch - best_epoch >= patience):
+                break
+    if validation_only:
+        # Candidate selection artifacts deliberately have no result.json and no
+        # test metrics. Standard analyze therefore cannot rank/test candidates.
+        selected = {
+            'status': 'validation_completed', 'config': config,
+            'seed': seed, 'subject_id': config.get('subject_id'),
+            'validation': history[best_epoch - 1]['validation'],
+            'best_checkpoint_epoch': best_epoch, 'epochs_trained': len(history),
+            'elapsed_seconds': time.monotonic() - started,
+            'experiment_id': experiment_identity(config), 'split_id': split['split_id'],
+            'parameter_count': sum(p.numel() for p in model.parameters()),
+        }
+        write_json(run_dir / 'selection.json', selected)
+        return selected
+    return evaluate_saved_checkpoint(config, bundle, split, run_dir,
+                                     elapsed_seconds=time.monotonic() - started, model=model)
+
+
+def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds=0., model=None):
+    """Evaluate a selected checkpoint; also used after validation-only search."""
+    from .models import get_model_spec
+    started = time.monotonic()
+    run_dir = Path(run_dir)
+    seed, options = config['seeds'][0], config['training']
+    device = torch.device(config['device'])
+    spec = get_model_spec(config['model'])
+    seed_everything(seed, config['deterministic'], config['threads'])
+    if model is None:
+        model = spec.build(config['model_options'], bundle.metadata, config['attention'], config['attention_options']).to(device)
+    loaders, normalization = make_loaders(bundle, split, config, seed)
+    counts = np.bincount(bundle.y[split['train']], minlength=bundle.metadata['num_classes'])
+    weights = (torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32, device=device)
+               if options['class_weights'] == 'balanced' else None)
+    loss_fn = ClassificationLoss(weights, options['loss'], options['focal_gamma'])
     checkpoint = torch.load(run_dir / 'checkpoint.pt', map_location='cpu', weights_only=False)
+    if (checkpoint['config'] != config or checkpoint['split_id'] != split['split_id']
+            or checkpoint['dataset_fingerprint'] != bundle.fingerprint):
+        raise ValueError('Selected checkpoint does not match its configuration, data and split')
+    if (normalization is None) != (checkpoint['normalization'] is None):
+        raise ValueError('Selected checkpoint normalization differs from its training split')
+    for key in ('mean', 'std'):
+        if normalization is not None and not np.array_equal(checkpoint['normalization'][key], normalization[key]):
+            raise ValueError('Selected checkpoint normalization differs from its training split')
     model.load_state_dict(checkpoint['model'])
     model.to(device)
     validation, val_y, val_prob = spec.evaluate(model, loaders['validation'], device, loss_fn)
@@ -234,10 +298,11 @@ def run_training(config, bundle, split, run_dir):
         'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
         'parameter_count': sum(p.numel() for p in model.parameters()),
         'trainable_parameter_count': sum(p.numel() for p in model.parameters() if p.requires_grad),
-        'best_checkpoint_epoch': best_epoch, 'validation': validation, 'test': test,
+        'best_checkpoint_epoch': checkpoint['epoch'], 'validation': validation, 'test': test,
+        'epochs_trained': len(json.loads((run_dir / 'history.json').read_text())),
         'test_by_subject': group_metrics,
         'training_class_counts': counts.tolist(), 'class_weights': None if weights is None else weights.cpu().tolist(),
-        'elapsed_seconds': time.monotonic() - started, 'config': config,
+        'elapsed_seconds': elapsed_seconds + time.monotonic() - started, 'config': config,
         'experiment_id': experiment_identity(config), 'comparison_id': comparison_identity(config),
         'token_axis': model.token_axis,
         'num_tokens': getattr(model, 'num_tokens', None),

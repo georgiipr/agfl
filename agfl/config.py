@@ -15,7 +15,9 @@ TRAINING_DEFAULTS = {
     "class_weights": "balanced", "focal_gamma": 2.0, "scheduler": "warmup_cosine",
     "warmup_epochs": 10, "min_lr_ratio": 0.0, "checkpoint_criterion": "accuracy",
     "gradient_clip": None, "num_workers": 0, "amp": False,
-    "augmentation": {"shift": 0, "scale": 0.0, "noise": 0.0},
+    "early_stopping_patience": 0, "early_stopping_min_epochs": 0,
+    "augmentation": {"shift": 0, "scale": 0.0, "noise": 0.0,
+                     "recombine_segments": 0, "recombine_probability": 0.5},
 }
 DEFAULTS = {
     "subject_id": None,
@@ -154,8 +156,18 @@ def resolve_config(config):
     if type(t['warmup_epochs']) is not int or t["warmup_epochs"] < 0 or not 0 <= t["min_lr_ratio"] <= 1:
         raise ValueError("Invalid warmup_epochs or min_lr_ratio")
     augmentation = t['augmentation']
-    if set(augmentation) != {'shift', 'scale', 'noise'}:
-        raise ValueError('augmentation accepts only shift, scale, noise')
+    if set(augmentation) != set(TRAINING_DEFAULTS['augmentation']):
+        raise ValueError('Unknown augmentation settings')
+    segments = augmentation['recombine_segments']
+    if type(segments) is not int or segments < 0 or segments == 1:
+        raise ValueError('augmentation.recombine_segments must be 0 (off) or at least 2')
+    if not 0 <= augmentation['recombine_probability'] <= 1:
+        raise ValueError('augmentation.recombine_probability must lie in [0, 1]')
+    if segments and (resolved['dataset'] != 'eeg' or resolved['model'] != 'eegnet'):
+        raise ValueError('Segment recombination is supported only for EEGNet on BCI IV 2a')
+    for key in ('early_stopping_patience', 'early_stopping_min_epochs'):
+        if type(t[key]) is not int or t[key] < 0:
+            raise ValueError(f'training.{key} must be a nonnegative integer')
     if type(augmentation['shift']) is not int or augmentation['shift'] < 0:
         raise ValueError('augmentation.shift must be a nonnegative integer')
     if not 0 <= augmentation['scale'] < 1 or not math.isfinite(augmentation['noise']) or augmentation['noise'] < 0:

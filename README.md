@@ -62,6 +62,8 @@ EEG uses electrode tokens and learned spatial readouts by default; ECG uses time
 change surrounding feature extraction and readout where needed. See
 [model structure and architecture changes](docs/model_attention_structure.md).
 Preserving AGFL's equations does not imply full-original-backbone parity.
+The targeted `eegnet-bci2a` preset below instead applies EEGNet's spatial
+convolution across all electrodes first, followed by AGFL over time.
 
 ## Launch on the experiment machine
 
@@ -141,6 +143,98 @@ python main.py plan --preset eeg --model dstseegencoder --attention performer
 Paths resolve from the launch directory. Override `data.data_dir` for another
 location. EEG E-session evaluation also requires official `AxxE.mat` labels;
 labels are never inferred. ECG selects MLII by name and records missing leads.
+
+## Improve EEGNet + AGFL on BCI IV 2a
+
+For the downloaded **46.76%** study, use this focused workflow. It keeps
+**EEGNet + AGFL, four classes and nine separately trained subjects**. The
+compact candidates restore early spatial filtering, preserve 31 time tokens,
+reduce feature width, use cross-entropy and a lower learning rate, and stop
+on validation stagnation. The search compares training-channel versus per-trial
+normalization and optional same-class training-trial segment recombination.
+**75% mean test accuracy is a target; these settings have not yet demonstrated it.**
+See [rationale, candidate settings and evaluation protocol](docs/eegnet_bci2a_improvement.md).
+
+Run these commands **on the cluster, from `AGFL`**, with `A01T.gdf` through
+`A09T.gdf` in `../ml`. A two-epoch execution check uses its own output directory:
+
+```bash
+source ~/.venv/bin/activate
+python -m pip install -e '.[dev,plots]'
+python -m pytest tests/test_eegnet_bci2a.py tests/test_engine.py tests/test_models.py tests/test_presets.py
+python main.py tune-eegnet --data-dir ../ml --subjects 1 --seeds 0 \
+  --candidate compact_trialnorm --epochs 2 --output-dir results/eegnet-bci2a-smoke
+```
+
+The full study runs five candidates, nine subjects and five seeds: **225
+validation-only training runs, then 45 selected checkpoint test evaluations**.
+It does not retrain the selected checkpoints. Run:
+
+```bash
+python main.py tune-eegnet --data-dir ../ml --output-dir results/eegnet-bci2a-search
+```
+
+Checkpoint selection and candidate selection use validation only, separately
+within each subject/seed split. Every candidate uses the same trial IDs in that
+split. Candidate runs never evaluate the test partition. Settings for all
+requested runs are written to `selection_report.json` before any final testing.
+The 60/20/20 T-session split, cue window, artifact exclusion and four-class task
+remain fixed. Different seeds use overlapping random splits; their scores do
+not represent independent new test cohorts.
+
+Relaunch the **identical command** after an interruption: completed candidates
+are reused and incomplete candidates restart from epoch 1 automatically.
+Use `--restart` to retrain everything in that same search. Use a new output
+directory when changing seeds, subjects, candidate list or epoch budget; this
+prevents old selected runs from being included in the new study.
+Add `--dry-run` to inspect settings without loading data. Repeat `--candidate`
+to request a subset; the five names are listed in the linked guide.
+
+If you want one fixed compact setting instead of searching, run:
+
+```bash
+python main.py run --preset eegnet-bci2a --output-dir results/eegnet-bci2a-fixed
+```
+
+This is 45 ordinary runs with the `compact_trialnorm` configuration. Use
+`--skip-completed` to preserve finished runs when relaunching that command.
+
+**Reports and plots for the search:** the overall score, each subject's score
+and the selected settings are in
+`results/eegnet-bci2a-search/search_report.md` and `search_result.json`.
+Analyze **`selected/`** to generate learning curves, confusion matrices and ROC
+plots for the selected checkpoints:
+
+```bash
+python main.py analyze results/eegnet-bci2a-search/selected \
+  --output-dir results/eegnet-bci2a-search/analysis --plots
+```
+
+Open `results/eegnet-bci2a-search/analysis/figures/index.md`. Candidate folders
+contain validation histories and `selection.json`, without test result files.
+Selected settings may differ across seeds/subjects, so generic `analyze`
+tables group them by configuration. **Use `search_report.md` for the overall
+score of this tuning procedure**, rather than averaging those configuration
+groups. For the fixed-preset command, analyze `results/eegnet-bci2a-fixed`.
+
+Generate signal, embedding and AGFL plots for every selected checkpoint using
+this Bash loop, then add sparsity/entropy-versus-accuracy figures:
+
+```bash
+task_results_root=results/eegnet-bci2a-search/selected
+task_diagnostics_root=results/eegnet-bci2a-search/analysis/diagnostics
+find "$task_results_root" -type f -name result.json -print0 |
+while IFS= read -r -d '' task_result_file; do
+  task_run_dir=${task_result_file%/result.json}
+  task_relative_run=${task_run_dir#"$task_results_root"/}
+  python main.py diagnose "$task_run_dir" \
+    --output-dir "$task_diagnostics_root/$task_relative_run" \
+    --device cuda --partition validation --embedding tsne || break
+done
+python main.py analyze "$task_results_root" \
+  --output-dir results/eegnet-bci2a-search/analysis --plots \
+  --diagnostics-root "$task_diagnostics_root"
+```
 
 ## Compare attention within one model
 
