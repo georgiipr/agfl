@@ -12,6 +12,7 @@
     "data": {
       "data_dir": "../ml"
     },
+    "split": {"protocol": "stratified"},
     "output_dir": "results/comparison-eeg",
     "model": "eegnet",
     "attention": "agfl"

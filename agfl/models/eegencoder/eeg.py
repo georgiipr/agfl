@@ -17,5 +17,5 @@ class EEGModel(EEGEncoderBackbone):
         batch, channels, samples = x.shape
         features = self.convolve(x.reshape(batch * channels, 1, samples))
         local = self.tcn_block(features)[:, :, -1].reshape(batch, channels, -1)
-        mixed = self.attn_blocks[0](self.pe(local)).mean(dim=1)
-        return self.classifier(local.mean(dim=1) + self.aa_drop(mixed))
+        mixed = self.spatial_readout(self.attn_blocks[0](self.pe(local)))
+        return self.classifier(self.spatial_readout(local) + self.aa_drop(mixed))

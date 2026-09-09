@@ -16,6 +16,14 @@ Run-level metrics pool the held-out samples. Subject-specific test metrics are
 also saved; the across-seed standard deviation is not a standard deviation
 across subjects.
 
+New BCI experiments have an explicit subject ID and a separate model per subject.
+`per_subject.csv` reports the mean and sample SD across that subject's seeds.
+`across_subjects.csv` first averages seeds within each person, then gives the
+equal-weight mean and sample SD of those subject means. It lists the subjects
+and completed seeds explicitly. Unequal seed coverage suppresses the overall
+score. These descriptive summaries are not a pooled subject-by-seed significance
+test; within-subject paired tests continue to require identical split IDs.
+
 AGFL is paired with vanilla attention, Performer, Linformer, and Nyströmformer
 only within the same chosen model, with all model options and head count fixed,
 when the comparison protocol matches and the tuple
@@ -53,7 +61,8 @@ overlapping subjects. Predeclare comparisons and use held-out subject/fold units
 for confirmatory analysis where appropriate; do not select the best ablation
 using test outcomes and then treat its p-value as preplanned evidence.
 
-Outputs are `aggregation.json`, `per_model.csv`, `attention_comparison.csv`,
+Outputs are `aggregation.json`, `per_model.csv`, `per_subject.csv`,
+`across_subjects.csv`, `attention_comparison.csv`,
 `agfl_ablations.csv`, `statistical_comparisons.csv`, and `report.md`.
 `aggregation.json` includes paths to every consumed source result. The CSVs
 include experiment IDs so different AGFL configurations cannot be mistaken for

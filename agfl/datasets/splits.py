@@ -113,6 +113,12 @@ def validate_split(bundle: SignalDataset, split: dict) -> None:
         group_sets = {name: set(bundle.groups[indices]) for name, indices in parts.items()}
         if any(group_sets[a] & group_sets[b] for a, b in (("train", "validation"), ("train", "test"), ("validation", "test"))):
             raise ValueError("Subject groups overlap despite a subject-independent split protocol")
+    if split['protocol'] == 'session':
+        sessions = np.asarray(bundle.metadata.get('sample_sessions', []))
+        if (sessions.shape != bundle.y.shape or
+                any(np.any(sessions[parts[name]] != expected) for name, expected in
+                    (('train', 'T'), ('validation', 'T'), ('test', 'E')))):
+            raise ValueError('Session split must train/validate on T and test only on E')
     if "sample_ids" in split:
         expected_ids = {name: [bundle.sample_ids[i] for i in indices] for name, indices in parts.items()}
         if split["sample_ids"] != expected_ids:

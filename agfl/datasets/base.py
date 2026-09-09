@@ -25,6 +25,11 @@ def source_fingerprint(path: str | Path) -> dict:
 
 
 def normalize_samples(x: np.ndarray, normalization: str) -> np.ndarray:
+    x = np.asarray(x)
+    if x.ndim != 3 or min(x.shape) < 1 or not np.issubdtype(x.dtype, np.number) or np.iscomplexobj(x):
+        raise ValueError('Normalization expects real, nonempty [N,C,T] signals')
+    if not np.isfinite(x).all():
+        raise ValueError('Normalization input contains non-finite signals')
     if normalization == "per_sample":
         # The original protocol standardizes each channel within its own trial.
         # No validation/test statistics enter a training sample.
@@ -104,7 +109,7 @@ class SignalDataset:
 
 
 def bandpass_finite_spans(data: np.ndarray, fs: float, lowcut: float, highcut: float,
-                          boundaries: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
+                          boundaries: list[int] | None = None, *, gdf_missing=False) -> tuple[np.ndarray, np.ndarray]:
     """Filter finite spans independently, never across run or missing-data gaps.
 
     Unusable samples remain NaN so trials touching them can be explicitly rejected.
@@ -124,7 +129,8 @@ def bandpass_finite_spans(data: np.ndarray, fs: float, lowcut: float, highcut: f
     # that sentinel; an isolated physiological minimum is retained.
     finite_signal = np.where(np.isfinite(signal), signal, np.inf)
     minima = finite_signal.min(axis=-1, keepdims=True)
-    sentinel = valid & np.all(signal == minima, axis=0)
+    # This marker belongs to the GDF format. A flat ECG baseline is not a GDF gap.
+    sentinel = valid & np.all(signal == minima, axis=0) if gdf_missing else np.zeros_like(valid)
     changes = np.diff(np.r_[False, sentinel, False].astype(np.int8))
     for start, stop in zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)):
         if stop - start >= 100:

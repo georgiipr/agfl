@@ -17,6 +17,7 @@ def save_run(root, attention, seed, value, split=None, model='eegnet', **overrid
               'dataset_fingerprint': config['dataset_fingerprint'], 'parameter_count': 100,
               'comparison_id': comparison_identity(config), 'experiment_id': experiment_identity(config),
               'config': config, 'validation': dict(accuracy=value, roc_auc=value, f1=value),
+              'subject_id': config.get('subject_id'),
               'test': dict(accuracy=value, roc_auc=value, f1=value)}
     path = root / model / attention / str(seed)
     path.mkdir(parents=True)
@@ -34,6 +35,22 @@ def test_paired_tests_match_scipy():
     assert paired_statistics([1, 1], [1, 1])['t_pvalue'] == 1
     assert paired_statistics([1], [0])['t_pvalue'] is None
     assert paired_statistics([1, 1], [0, 0])['cohen_dz'] is None
+
+
+def test_individual_subject_summary_does_not_pool_people_and_seeds(tmp_path):
+    for subject, scores in [('A01', [.6, .8]), ('A02', [.9, 1.0])]:
+        for seed, score in enumerate(scores):
+            save_run(tmp_path / 'runs' / subject, 'agfl', seed, score,
+                     subject_id=subject, data={'subjects': [int(subject[1:])]})
+    result = analyze_results(tmp_path / 'runs', tmp_path / 'analysis')
+    assert {r['subject_id'] for r in result['experiments']} == {'A01', 'A02'}
+    row = next(r for r in result['across_subjects'] if r['partition'] == 'test' and r['metric'] == 'accuracy')
+    assert row['n_subjects'] == 2
+    assert row['mean_of_subject_means'] == pytest.approx(.825)
+    assert row['between_subject_sd'] == pytest.approx(np.std([.7, .95], ddof=1))
+    save_run(tmp_path / 'runs' / 'A01', 'agfl', 2, .7, subject_id='A01', data={'subjects': [1]})
+    partial = analyze_results(tmp_path / 'runs', tmp_path / 'partial')
+    assert all(r['mean_of_subject_means'] is None and r['reason'] for r in partial['across_subjects'])
 
 
 def test_holm_respects_order_and_missing_values():

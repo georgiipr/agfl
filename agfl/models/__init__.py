@@ -7,7 +7,11 @@ from pkgutil import iter_modules
 def model_registry():
     registry = {}
     for module in sorted(iter_modules(__path__), key=lambda item: item.name):
-        if not module.ispkg or module.name.startswith("_"):
+        # Legacy model packages were removed when model backbones and attention
+        # mechanisms became separate configuration axes. Ignore stale copies
+        # left by deployments that update files without deleting old folders.
+        if (not module.ispkg or module.name.startswith("_") or
+                module.name.startswith("legacy_")):
             continue
         package = import_module(f"{__name__}.{module.name}")
         spec = getattr(package, "SPEC", None)

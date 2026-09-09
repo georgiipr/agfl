@@ -183,6 +183,34 @@ def test_no_attention_is_not_a_selectable_model():
         get_model_spec('none')
 
 
+def test_spatial_readout_can_distinguish_opposite_electrode_patterns():
+    from agfl.models._shared.layers import ElectrodeReadout
+    readout = ElectrodeReadout(2, 1)
+    with torch.no_grad():
+        readout.projection.weight.copy_(torch.tensor([[[1., -1.]]]))
+    tokens = torch.tensor([[[2.], [-2.]], [[-2.], [2.]]])
+    torch.testing.assert_close(tokens.mean(1), torch.zeros(2, 1))
+    torch.testing.assert_close(readout(tokens), torch.tensor([[4.], [-4.]]))
+
+
+def test_eegnet_zero_initialized_agfl_does_not_block_feature_gradients():
+    model = get_model_spec('eegnet').build(small_model_options('eegnet', 'eeg'),
+        {'modality': 'eeg', 'channels': 4, 'samples': 65, 'num_classes': 3}, 'agfl', {'heads': 2})
+    loss = torch.nn.functional.cross_entropy(model(torch.randn(3, 4, 65)), torch.tensor([0, 1, 2]))
+    loss.backward()
+    assert model.block1[0].weight.grad.abs().sum() > 0
+    assert model.spatial_readout.projection.weight.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize('key', MODELS)
+def test_all_eeg_models_have_learned_spatial_readouts(key):
+    from agfl.models._shared.layers import ElectrodeReadout
+    model = get_model_spec(key).build(small_model_options(key, 'eeg'),
+        {'modality': 'eeg', 'channels': 4, 'samples': 65, 'num_classes': 3}, 'mha', {'heads': 2})
+    readouts = [m for m in model.modules() if isinstance(m, ElectrodeReadout)]
+    assert readouts and all(m.projection is not None for m in readouts)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA check for target environment')
 @pytest.mark.parametrize('key', MODELS)
 @pytest.mark.parametrize('attention', ATTENTIONS)

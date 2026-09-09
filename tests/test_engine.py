@@ -35,6 +35,19 @@ def test_focal_probability_is_unweighted():
     assert torch.isfinite(logits.grad).all()
 
 
+def test_python_launch_expands_independent_subject_runs(monkeypatch):
+    import agfl.engine
+    launched = []
+    def record(config, skip_completed=False):
+        launched.append(config)
+        return [{'subject_id': config['subject_id']}]
+    monkeypatch.setattr(agfl.engine, '_run_experiment', record)
+    results = run_experiment({'dataset': 'eeg', 'data': {'subjects': [2, 1]}})
+    assert results == [{'subject_id': 'A01'}, {'subject_id': 'A02'}]
+    assert [c['data']['subjects'] for c in launched] == [[1], [2]]
+    assert all(c['seeds'] == [0, 1, 2, 3, 4] for c in launched)
+
+
 def test_undefined_auc_and_macro_f1_use_all_declared_classes():
     metrics = classification_metrics([0, 0], [[.9, .1], [.7, .3]])
     assert metrics['accuracy'] == 1
@@ -79,6 +92,7 @@ def test_saved_configuration_reproduces_selected_checkpoint_and_predictions(tmp_
     first = run_experiment(tiny_config(tmp_path))[0]
     result_path = next((tmp_path / 'results').rglob('result.json'))
     history = json.loads(result_path.with_name('history.json').read_text())
+    assert all(0 <= row['train_accuracy'] <= 1 for row in history)
     expected_best = max(history, key=lambda epoch: epoch['validation']['accuracy'])['epoch']
     assert first['best_checkpoint_epoch'] == expected_best
     assert first['split_id'] == first['config']['expected_split_id']

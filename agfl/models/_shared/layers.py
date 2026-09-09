@@ -39,3 +39,18 @@ class CausalConv1d(nn.Module):
 
     def forward(self, x):
         return self.conv(F.pad(x, (self.padding, 0)))
+
+
+class ElectrodeReadout(nn.Module):
+    """Learn a signed spatial filter per feature, retaining electrode identity."""
+    def __init__(self, channels, features, mode='learned'):
+        super().__init__()
+        if mode not in {'learned', 'mean'}:
+            raise ValueError('spatial_readout must be learned or mean')
+        self.projection = (nn.Conv1d(features, features, channels, groups=features, bias=False)
+                           if mode == 'learned' else None)
+
+    def forward(self, tokens):
+        if self.projection is None:
+            return tokens.mean(dim=1)
+        return self.projection(tokens.transpose(1, 2)).squeeze(-1)

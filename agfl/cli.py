@@ -2,7 +2,7 @@
 import argparse
 import json
 import sys
-from .config import apply_overrides, merge, read_config, resolve_config, digest
+from .config import apply_overrides, merge, read_config, resolve_experiments, digest
 from .presets import load_preset, preset_names
 
 
@@ -75,12 +75,15 @@ def main(argv=None):
             from pathlib import Path
             from .visualization.results import generate_result_plots
             generate_result_plots(result, Path(args.output_dir) / 'figures', diagnostics_root=args.diagnostics_root)
+            print(f'Plot index: {args.output_dir}/figures/index.md')
+        print(f'Result tables: {args.output_dir}/report.md')
         return
     if args.command == 'diagnose':
         from .visualization.diagnostics import diagnose_run
         diagnose_run(args.run_dir, args.output_dir, device=args.device, partition=args.partition,
                      max_samples=args.max_samples, embedding=args.embedding, data_dir=args.data_dir,
                      labels_dir=args.labels_dir, data_path=args.data_path)
+        print(f'Diagnostic plot index: {args.output_dir}/index.md')
         return
     document = read_config(args.config) if args.config else load_preset(args.preset) if args.preset else {}
     is_sweep = 'base' in document or 'experiments' in document
@@ -100,12 +103,12 @@ def main(argv=None):
             value = getattr(args, key, None)
             if value is not None:
                 config[key] = value
-        resolved_configs.append(resolve_config(apply_overrides(config, args.set)))
+        resolved_configs.extend(resolve_experiments(apply_overrides(config, args.set)))
     # A named backbone may already use an explicit ablation's value (e.g.
     # EEGEncoder defaults to K=3). Run each resolved configuration only once.
     resolved_configs = list({digest(config): config for config in resolved_configs}.values())
     if args.command == 'plan' or args.dry_run:
-        print(json.dumps(resolved_configs if is_sweep else resolved_configs[0], indent=2))
+        print(json.dumps(resolved_configs if is_sweep or len(resolved_configs) > 1 else resolved_configs[0], indent=2))
         if args.command == 'plan':
             import shlex
             arguments = list(sys.argv[1:] if argv is None else argv)
@@ -114,9 +117,14 @@ def main(argv=None):
         return
     from .engine import run_experiment
     for config in resolved_configs:
-        print(f"Launching {config['dataset']}/{config['model']} attention={config['attention']} ({config['model_variant']}) "
+        print(f"Launching {config['dataset']}/{config['model']} subject={config.get('subject_id') or 'cohort'} attention={config['attention']} ({config['model_variant']}) "
               f"seeds={config['seeds']} epochs={config['training']['epochs']} device={config['device']}")
         run_experiment(config, skip_completed=args.skip_completed)
+    import shlex
+    for root in sorted({config['output_dir'] for config in resolved_configs}):
+        print('\nTraining finished. Generate tables and result plots on this machine:')
+        print(f'python main.py analyze {shlex.quote(root)} --output-dir {shlex.quote(root + "/analysis")} --plots')
+    print('For signal, embedding and attention plots, use diagnose; the README includes a loop for every subject and seed.')
 
 
 if __name__ == '__main__':

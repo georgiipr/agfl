@@ -1,5 +1,6 @@
 """BCI Competition IV 2a: explicit channel/time axes and session labels."""
 from bisect import bisect_right
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -12,20 +13,44 @@ CHANNEL_NAMES = ["Fz", "FC3", "FC1", "FCz", "FC2", "FC4", "C5", "C3", "C1", "Cz"
                  "C4", "C6", "CP3", "CP1", "CPz", "CP2", "CP4", "P1", "Pz", "P2", "POz"]
 
 
+def individual_subjects(config):
+    """One model is trained per person; never pool BCI IV 2a subjects."""
+    subjects = config['data']['subjects']
+    if (not isinstance(subjects, list) or not subjects or
+            any(type(s) is not int or not 1 <= s <= 9 for s in subjects) or
+            len(set(subjects)) != len(subjects)):
+        raise ValueError('BCI IV 2a subjects must be unique integers in 1..9')
+    if config['split']['protocol'] not in {'stratified', 'session'}:
+        raise ValueError('BCI IV 2a trains each subject individually: use stratified or session splitting')
+    if config['data']['filter_scope'] != 'trial':
+        raise ValueError('Within-subject training requires filter_scope=trial to avoid filtering across held-out trials')
+    experiments = []
+    for subject in sorted(subjects):
+        experiment = deepcopy(config)
+        subject_id = f'A{subject:02d}'
+        if config.get('subject_id') not in (None, subject_id):
+            raise ValueError('Saved subject_id does not match data.subjects')
+        experiment['data']['subjects'] = [subject]
+        experiment['subject_id'] = subject_id
+        experiments.append(experiment)
+    return experiments
+
+
 @register_dataset("eeg", "eeg", {
     "data_dir": "../ml", "subjects": list(range(1, 10)), "sessions": ["T"],
-    "labels_dir": None, "window": 1000, "offset_seconds": 0.5,
-    "lowcut": 2.0, "highcut": 30.0, "normalization": "per_sample",
-    "artifact_policy": "include", "filter_scope": "run",
-}, "Four-class BCI IV 2a motor imagery; 22 EEG channels")
+    "labels_dir": None, "window": 1000, "offset_seconds": 0.0,
+    "lowcut": 2.0, "highcut": 30.0, "normalization": "train_channel",
+    "artifact_policy": "exclude", "filter_scope": "trial",
+}, "Four-class BCI IV 2a motor imagery; one experiment per subject",
+    experiment_defaults={'split': {'protocol': 'stratified'}}, expand_experiments=individual_subjects)
 def load_eeg(config):
     import mne
     from scipy.io import loadmat
 
     root = Path(config["data_dir"]).expanduser().resolve()
-    subjects = [int(s) for s in config["subjects"]]
+    subjects = config["subjects"]
     sessions = [str(s).upper() for s in config["sessions"]]
-    if not subjects or len(set(subjects)) != len(subjects) or any(s < 1 or s > 9 for s in subjects):
+    if not subjects or any(type(s) is not int or s < 1 or s > 9 for s in subjects) or len(set(subjects)) != len(subjects):
         raise ValueError("BCI IV 2a subjects must be a nonempty unique subset of 1..9")
     if not sessions or len(set(sessions)) != len(sessions) or not set(sessions) <= {"T", "E"}:
         raise ValueError("BCI IV 2a sessions must be a unique nonempty subset of ['T', 'E']")
@@ -33,8 +58,8 @@ def load_eeg(config):
         raise ValueError("artifact_policy must be include or exclude")
     if config["filter_scope"] not in {"run", "trial", "continuous"}:
         raise ValueError("filter_scope must be run, trial, or continuous")
-    window = int(config["window"])
-    if window < 1 or config["offset_seconds"] < 0:
+    window = config["window"]
+    if type(window) is not int or window < 1 or not np.isfinite(config['offset_seconds']) or config["offset_seconds"] < 0:
         raise ValueError("EEG window must be positive and offset_seconds nonnegative")
     signals, labels, groups, ids, sample_sessions, sample_runs = [], [], [], [], [], []
     sources, skipped = [], {"artifact": 0, "out_of_bounds": 0, "nonfinite": 0}
@@ -76,7 +101,7 @@ def load_eeg(config):
                 external_labels = values.astype(np.int64) - 1
                 sources.append(source_fingerprint(labels_path))
             if config["filter_scope"] == "run":
-                continuous, _ = bandpass_finite_spans(continuous, fs, config["lowcut"], config["highcut"], run_starts)
+                continuous, _ = bandpass_finite_spans(continuous, fs, config["lowcut"], config["highcut"], run_starts, gdf_missing=True)
             elif config["filter_scope"] == "continuous":
                 from scipy.signal import butter, filtfilt
                 b, a = butter(4, [config["lowcut"] / (fs / 2), config["highcut"] / (fs / 2)], btype="band")
@@ -95,12 +120,14 @@ def load_eeg(config):
                     skipped["artifact"] += 1
                     continue
                 start, stop = position + offset, position + offset + window
-                if start < 0 or stop > continuous.shape[1]:
+                next_run = bisect_right(run_starts, position)
+                run_end = run_starts[next_run] if next_run < len(run_starts) else continuous.shape[1]
+                if start < 0 or stop > min(trial_end, run_end, continuous.shape[1]):
                     skipped["out_of_bounds"] += 1
                     continue
                 epoch = continuous[:, start:stop]
                 if config["filter_scope"] == "trial":
-                    epoch, _ = bandpass_finite_spans(epoch, fs, config["lowcut"], config["highcut"])
+                    epoch, _ = bandpass_finite_spans(epoch, fs, config["lowcut"], config["highcut"], gdf_missing=True)
                 if not np.isfinite(epoch).all():
                     skipped["nonfinite"] += 1
                     continue

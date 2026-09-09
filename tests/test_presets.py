@@ -2,7 +2,7 @@
 import json
 import pytest
 from agfl.cli import main
-from agfl.config import merge, resolve_config
+from agfl.config import merge, resolve_config, resolve_experiments
 from agfl.presets import load_preset, preset_names
 
 
@@ -64,8 +64,36 @@ def test_model_settings_cannot_hide_an_attention_selection():
 def test_duplicate_sweep_after_attention_override_runs_each_configuration_once(capsys):
     main(['plan', '--preset', 'eeg-comparison', '--attention', 'agfl'])
     configurations = json.loads(capsys.readouterr().out.split('\nLaunch on')[0])
-    assert len(configurations) == 1
-    assert configurations[0]['attention'] == 'agfl'
+    assert len(configurations) == 9
+    assert {row['subject_id'] for row in configurations} == {f'A{s:02d}' for s in range(1, 10)}
+    assert all(row['attention'] == 'agfl' for row in configurations)
+
+
+def test_subjects_expand_without_mutating_config_or_loading_data():
+    original = {'dataset': 'eeg', 'data': {'subjects': [3, 1]}, 'seeds': [7]}
+    experiments = resolve_experiments(original)
+    assert original['data']['subjects'] == [3, 1]
+    assert [r['data']['subjects'] for r in experiments] == [[1], [3]]
+    assert [r['subject_id'] for r in experiments] == ['A01', 'A03']
+    assert all(r['split']['protocol'] == 'stratified' and r['seeds'] == [7] for r in experiments)
+    assert resolve_experiments(experiments[0]) == [experiments[0]]
+
+
+def test_individual_subjects_reject_pooled_protocol_and_filter_leakage():
+    with pytest.raises(ValueError, match='individually'):
+        resolve_experiments({'dataset': 'eeg', 'split': {'protocol': 'group'}})
+    with pytest.raises(ValueError, match='held-out trials'):
+        resolve_experiments({'dataset': 'eeg', 'data': {'filter_scope': 'run'}})
+    with pytest.raises(ValueError, match='subject_id'):
+        resolve_experiments({'dataset': 'eeg', 'subject_id': 'A02', 'data': {'subjects': [1]}})
+
+
+def test_comparison_expands_all_subject_attention_pairs(capsys):
+    main(['plan', '--preset', 'eeg-comparison'])
+    configurations = json.loads(capsys.readouterr().out.split('\nLaunch on')[0])
+    assert len(configurations) == 45
+    assert len({(r['subject_id'], r['attention']) for r in configurations}) == 45
+    assert all(len(r['data']['subjects']) == 1 and len(r['seeds']) == 5 for r in configurations)
 
 
 @pytest.mark.parametrize('key', ['eegnet', 'eegencoder', 'dstseegencoder', 'conformer'])

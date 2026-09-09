@@ -1,5 +1,6 @@
 {
   "base": {
+    "split": {"protocol": "stratified"},
     "model": "eegnet",
     "dataset": "eeg",
     "device": "cuda",

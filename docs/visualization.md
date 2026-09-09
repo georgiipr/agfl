@@ -9,6 +9,11 @@ Training reruns now replace matching seed artifacts by default. Rerun analysis
 and checkpoint diagnostics afterwards to refresh exported figures; training does
 not regenerate them automatically.
 
+The README contains the full workflow, dependency installation, result figures,
+every-subject/every-seed diagnostics, output indexes and diagnostic comparisons.
+BCI runs now live under `eeg/subject_Axx/`; each subject trains separately. Old
+cohort results keep their original labels.
+
 ## Figures from completed runs
 
 Install the plotting extra on the analysis/experiment machine if needed:
@@ -63,10 +68,11 @@ To generate diagnostics for every completed EEG seed after the study finishes,
 run this loop from `AGFL` on the target machine:
 
 ```bash
-for task_run_dir in results/full-eeg/eeg/*/seed_*; do
-  [ -f "$task_run_dir/result.json" ] || continue
+find results/full-eeg/eeg -type f -name result.json -print0 |
+while IFS= read -r -d '' task_result_file; do
+  task_run_dir=${task_result_file%/result.json}
   python main.py diagnose "$task_run_dir" \
-    --output-dir "analysis/diagnostics/${task_run_dir#results/full-eeg/}"
+    --output-dir "analysis/diagnostics/${task_run_dir#results/full-eeg/}" || break
 done
 ```
 

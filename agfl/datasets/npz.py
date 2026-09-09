@@ -21,7 +21,9 @@ def _load(config, modality):
     metadata = {"dataset": f"npz_{modality}", "modality": modality, "preprocessing": config,
                 "sources": [source_fingerprint(path)], "protocol_version": "npz-v1"}
     if config["num_classes"] is not None:
-        metadata["num_classes"] = int(config["num_classes"])
+        if type(config['num_classes']) is not int or config['num_classes'] < 2:
+            raise ValueError('NPZ num_classes must be an integer >= 2')
+        metadata["num_classes"] = config["num_classes"]
     return SignalDataset(normalize_samples(x, config["normalization"]), y, groups, ids, metadata)
 
 

@@ -1,7 +1,7 @@
 """EEGEncoder convolution + causal TCN + parallel attention fusion."""
 from torch import nn
 from torch.nn import functional as F
-from .._shared.layers import CausalConv1d, PositionalEncoding, positive_options
+from .._shared.layers import CausalConv1d, ElectrodeReadout, PositionalEncoding, positive_options
 
 
 class TemporalResidual(nn.Module):
@@ -43,6 +43,7 @@ class EEGEncoderBackbone(nn.Module):
         self.num_tokens = metadata['channels'] if electrode_tokens else steps
         self.pe = PositionalEncoding(dim, self.num_tokens)
         self.attn_blocks = nn.ModuleList([attention(dim, self.num_tokens, token_axis=self.token_axis)])
+        self.spatial_readout = ElectrodeReadout(metadata['channels'], dim, options['spatial_readout']) if electrode_tokens else None
         self.aa_drop = nn.Dropout(options['dropout'])
         self.classifier = nn.Sequential(nn.Linear(dim, max(1, dim // 2)), nn.ELU(), nn.Dropout(options['dropout']),
                                         nn.Linear(max(1, dim // 2), metadata['num_classes']))

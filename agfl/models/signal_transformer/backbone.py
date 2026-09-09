@@ -2,6 +2,7 @@
 
 import torch
 from torch import nn
+from .._shared.layers import ElectrodeReadout
 
 
 def validate_common(options):
@@ -53,6 +54,7 @@ class SignalBackbone(nn.Module):
                 block.mixer.depth = len(self.blocks)
         self.norm = nn.LayerNorm(options["dim"])
         self.classifier = nn.Linear(options["dim"], int(metadata["num_classes"]))
+        self.spatial_readout = ElectrodeReadout(num_tokens, options['dim'], options['spatial_readout']) if self.token_axis == 'electrode' else None
 
     def forward_tokens(self, x):
         if x.ndim != 3 or tuple(x.shape[1:]) != self.expected_shape:
@@ -63,4 +65,6 @@ class SignalBackbone(nn.Module):
         return self.norm(x)
 
     def forward(self, x):
-        return self.classifier(self.forward_tokens(x).mean(dim=1))
+        tokens = self.forward_tokens(x)
+        pooled = self.spatial_readout(tokens) if self.spatial_readout is not None else tokens.mean(dim=1)
+        return self.classifier(pooled)

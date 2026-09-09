@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from .._shared.layers import positive_options
+from .._shared.layers import ElectrodeReadout, positive_options
 
 
 class FeedForward(nn.Module):
@@ -56,6 +56,7 @@ class ConformerBackbone(nn.Module):
         self.norm = nn.LayerNorm(options['dim'])
         self.cls = nn.Linear(options['dim'], metadata['num_classes'])
         self.pos_emb = nn.Parameter(torch.randn(1, tokens, options['dim']))
+        self.spatial_readout = ElectrodeReadout(tokens, options['dim'], options['spatial_readout']) if axis == 'electrode' else None
 
     @property
     def classifier(self):
@@ -66,4 +67,5 @@ class ConformerBackbone(nn.Module):
         for layer in self.layers:
             x = layer(x)
         x = self.norm(x)
-        return self.cls(x.mean(1) + x.max(1).values)
+        pooled = self.spatial_readout(x) if self.spatial_readout is not None else x.mean(1)
+        return self.cls(pooled + x.max(1).values)

@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from .._shared.layers import CausalConv1d, PositionalEncoding, positive_options
+from .._shared.layers import CausalConv1d, ElectrodeReadout, PositionalEncoding, positive_options
 
 
 class SwiGLU(nn.Module):
@@ -41,6 +41,7 @@ class Branch(nn.Module):
         self.stage2 = temporal_stage(dim, 2, options['dropout'], nn.ReLU)
         self.electrode_position = PositionalEncoding(dim, tokens) if axis == 'electrode' else nn.Identity()
         self.transformer = nn.Sequential(*[AttentionBlock(dim, options, attention, tokens, i, axis) for i in range(options['depth'])])
+        self.spatial_readout = ElectrodeReadout(tokens, dim, options['spatial_readout']) if axis == 'electrode' else None
         self.classifier = nn.Sequential(nn.Linear(dim, dim * 2), nn.ReLU(), nn.Dropout(options['dropout']),
                                         nn.Linear(dim * 2, metadata['num_classes']))
 
@@ -50,7 +51,7 @@ class Branch(nn.Module):
         temporal = F.relu(self.stage2(stage1) + stage1)[:, :, -1]
         if electrode_tokens:
             tokens = temporal.reshape(batch, channels, -1)
-            return tokens.mean(1) + self.transformer(self.electrode_position(tokens)).mean(1)
+            return self.spatial_readout(tokens) + self.spatial_readout(self.transformer(self.electrode_position(tokens)))
         return temporal + self.transformer(x.transpose(1, 2))[:, -1]
 
 

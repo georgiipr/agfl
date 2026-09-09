@@ -12,7 +12,8 @@ from agfl.config import experiment_selection
 
 def selection_label(run):
     model, attention = experiment_selection(run['config'])
-    return f'{model} / {attention}'
+    subject = run['config'].get('subject_id')
+    return f'{model} / {attention}' + (f' / {subject}' if subject else '')
 
 from .common import FigureWriter, slug
 
@@ -65,7 +66,9 @@ def plot_history(writer, run, prefix):
     axes[0].set(title='Loss', ylabel='Loss')
     for metric, title in zip(METRICS, TITLES):
         axes[1].plot(epochs, [r['validation'].get(metric) if r['validation'].get(metric) is not None else np.nan for r in history], label=title)
-    axes[1].set(title='Validation metrics', ylabel='Score', ylim=(0, 1))
+    if all('train_accuracy' in row for row in history):
+        axes[1].plot(epochs, [r['train_accuracy'] for r in history], linestyle='--', label='Training accuracy (train mode)')
+    axes[1].set(title='Validation metrics / training accuracy', ylabel='Score', ylim=(0, 1))
     axes[2].plot(epochs, [r['learning_rate'] for r in history])
     axes[2].set(title='Learning rate', ylabel='Learning rate')
     for axis in axes:
@@ -135,7 +138,7 @@ def plot_comparison(writer, experiments, runs_by_experiment, prefix, title):
                 axis.scatter(position + np.linspace(-.12, .12, len(values)), values, s=18, alpha=.7)
                 axis.errorbar(position, summary['mean'], yerr=summary['std'], fmt='ks', capsize=5)
             axis.text(position, 1.02, f'n={len(values)}', ha='center', fontsize=8)
-        axis.set(xticks=range(len(experiments)), xticklabels=[f"{e['model']} / {e['attention']}\n{e['experiment_id'][:8]}" for e in experiments],
+        axis.set(xticks=range(len(experiments)), xticklabels=[f"{e['model']} / {e['attention']}\n{e.get('subject_id') or 'cohort'} / {e['experiment_id'][:8]}" for e in experiments],
                  ylim=(0, 1.1), title=metric_title, ylabel='Test score')
         axis.tick_params(axis='x', rotation=30)
         axis.grid(axis='y', alpha=.2)

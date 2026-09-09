@@ -17,17 +17,21 @@ class DatasetSpec:
     defaults: dict
     loader: Callable[[dict], SignalDataset]
     description: str = ""
+    experiment_defaults: dict | None = None
+    expand_experiments: Callable | None = None
 
 
 _REGISTRY: dict[str, DatasetSpec] = {}
 _DISCOVERED = False
 
 
-def register_dataset(key: str, modality: str, defaults: dict, description: str = ""):
+def register_dataset(key: str, modality: str, defaults: dict, description: str = "", *,
+                     experiment_defaults=None, expand_experiments=None):
     def decorator(loader):
         if key in _REGISTRY:
             raise ValueError(f"Dataset key {key!r} is already registered")
-        _REGISTRY[key] = DatasetSpec(key, modality, deepcopy(defaults), loader, description)
+        _REGISTRY[key] = DatasetSpec(key, modality, deepcopy(defaults), loader, description,
+                                     deepcopy(experiment_defaults), expand_experiments)
         return loader
     return decorator
 

@@ -52,6 +52,14 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "patient identity"):
             get_split(ecg, {"protocol": "stratified"}, 0, self.root)
 
+    def test_session_validation_rejects_swapping_t_and_e_trials(self):
+        self.bundle.metadata['sample_sessions'] = ['T'] * 36 + ['E'] * 36
+        split = get_split(self.bundle, {'protocol': 'session'}, 0, self.root)
+        first, second = split['train'][0], split['test'][0]
+        split['train'][0], split['test'][0] = second, first
+        with self.assertRaisesRegex(ValueError, 'test only on E'):
+            validate_split(self.bundle, split)
+
     def test_persisted_indices_cannot_silently_change(self):
         split = get_split(self.bundle, {}, 3, self.root)
         path = self.root / f"{split['split_id']}.json"
@@ -100,6 +108,22 @@ class DatasetTests(unittest.TestCase):
         normalized = normalize_samples(x, "per_sample")
         np.testing.assert_allclose(normalized.mean(axis=-1), 0, atol=1e-7)
         np.testing.assert_allclose(normalized.std(axis=-1), 1, atol=1e-7)
+
+    def test_flat_ecg_is_not_treated_as_a_gdf_missing_run(self):
+        flat = np.zeros((1, 1024))
+        filtered, valid = bandpass_finite_spans(flat, 360, .5, 45)
+        self.assertTrue(valid.all())
+        np.testing.assert_array_equal(filtered, flat)
+        _, gdf_valid = bandpass_finite_spans(flat, 250, 2, 30, gdf_missing=True)
+        self.assertFalse(gdf_valid.any())
+
+    def test_eeg_defaults_match_individual_trial_evaluation(self):
+        defaults = get_dataset_spec('eeg').defaults
+        self.assertEqual(defaults['filter_scope'], 'trial')
+        self.assertEqual(defaults['normalization'], 'train_channel')
+        self.assertEqual(defaults['artifact_policy'], 'exclude')
+        self.assertEqual(defaults['offset_seconds'], 0)
+        self.assertEqual(defaults['window'], 1000)
 
     def test_npz_requires_explicit_subject_ids(self):
         path = self.root / "signals.npz"

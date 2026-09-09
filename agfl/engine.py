@@ -10,6 +10,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 from .config import comparison_identity, experiment_identity
 from .metrics import classification_metrics
 from .reproducibility import seed_everything, seed_worker, provenance
@@ -138,6 +139,8 @@ def run_training(config, bundle, split, run_dir):
     from .models import get_model_spec
     run_dir = Path(run_dir)
     seed = config['seeds'][0]
+    if config.get('subject_id') is not None and set(bundle.groups) != {config['subject_id']}:
+        raise ValueError('An individual-subject experiment cannot contain another subject')
     seed_everything(seed, config['deterministic'], config['threads'])
     device = torch.device(config['device'])
     if device.type == 'cuda' and not torch.cuda.is_available():
@@ -161,51 +164,56 @@ def run_training(config, bundle, split, run_dir):
     history, best_value, best_epoch = [], None, None
     criterion = options['checkpoint_criterion']
     started = time.monotonic()
-    for epoch in range(1, options['epochs'] + 1):
-        model.train()
-        loss_total, n, skipped_steps = 0., 0, 0
-        learning_rate = optimizer.param_groups[0]['lr']
-        for x, y in loaders['train']:
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, enabled=options['amp'], dtype=torch.float16):
-                loss = loss_fn(model(x), y)
-            if not torch.isfinite(loss):
-                raise FloatingPointError(f'Nonfinite training loss at epoch {epoch}')
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            if options['gradient_clip'] is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), options['gradient_clip'], error_if_nonfinite=not options['amp'])
-            elif not options['amp'] and any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
-                raise FloatingPointError('Nonfinite gradient')
-            previous_scale = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
-            skipped_steps += int(scaler.get_scale() < previous_scale)
-            if hasattr(model, 'clip_weights'):
-                model.clip_weights()
-            loss_total += float(loss.detach()) * len(y)
-            n += len(y)
-        validation, _, _ = spec.evaluate(model, loaders['validation'], device, loss_fn)
-        value = validation[criterion]
-        if value is None or not math.isfinite(value):
-            raise ValueError(f'Checkpoint criterion {criterion} is undefined on validation data')
-        better = best_value is None or (value < best_value if criterion == 'loss' else value > best_value)
-        if better:
-            best_value, best_epoch = value, epoch
-            torch.save({
-                'model': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
-                'epoch': epoch, 'validation': validation, 'config': config,
-                'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
-                'normalization': normalization}, run_dir / 'checkpoint.pt')
-        history.append({'epoch': epoch, 'train_loss': loss_total / n,
-                        'validation': validation, 'learning_rate': learning_rate,
-                        'amp_skipped_steps': skipped_steps})
-        if scheduler is not None:
-            scheduler.step(validation['loss']) if options['scheduler'] == 'plateau' else scheduler.step()
-        write_json(run_dir / 'history.json', history)
-        print(f"{config['dataset']}/{config['model']}/{config['attention']} seed={seed} epoch={epoch}/{options['epochs']} "
-              f"loss={loss_total/n:.4f} val_accuracy={validation['accuracy']:.4f}", flush=True)
+    description = f"{config['dataset']}/{config['model']}/{config['attention']} {config.get('subject_id') or 'cohort'} seed={seed}"
+    with tqdm(range(1, options['epochs'] + 1), desc=description, unit='epoch',
+              dynamic_ncols=True, mininterval=1.0, disable=None) as progress:
+        for epoch in progress:
+            model.train()
+            loss_total, n, skipped_steps, correct = 0., 0, 0, 0
+            learning_rate = optimizer.param_groups[0]['lr']
+            for x, y in loaders['train']:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type=device.type, enabled=options['amp'], dtype=torch.float16):
+                    logits = model(x)
+                    loss = loss_fn(logits, y)
+                correct += int((logits.detach().argmax(-1) == y).sum())
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f'Nonfinite training loss at epoch {epoch}')
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if options['gradient_clip'] is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), options['gradient_clip'], error_if_nonfinite=not options['amp'])
+                elif not options['amp'] and any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
+                    raise FloatingPointError('Nonfinite gradient')
+                previous_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                skipped_steps += int(scaler.get_scale() < previous_scale)
+                if hasattr(model, 'clip_weights'):
+                    model.clip_weights()
+                loss_total += float(loss.detach()) * len(y)
+                n += len(y)
+            validation, _, _ = spec.evaluate(model, loaders['validation'], device, loss_fn)
+            value = validation[criterion]
+            if value is None or not math.isfinite(value):
+                raise ValueError(f'Checkpoint criterion {criterion} is undefined on validation data')
+            better = best_value is None or (value < best_value if criterion == 'loss' else value > best_value)
+            if better:
+                best_value, best_epoch = value, epoch
+                torch.save({
+                    'model': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                    'epoch': epoch, 'validation': validation, 'config': config,
+                    'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
+                    'normalization': normalization}, run_dir / 'checkpoint.pt')
+            history.append({'epoch': epoch, 'train_loss': loss_total / n, 'train_accuracy': correct / n,
+                            'validation': validation, 'learning_rate': learning_rate,
+                            'amp_skipped_steps': skipped_steps})
+            if scheduler is not None:
+                scheduler.step(validation['loss']) if options['scheduler'] == 'plateau' else scheduler.step()
+            write_json(run_dir / 'history.json', history)
+            progress.set_postfix(loss=f'{loss_total / n:.4f}', train_acc=f'{correct / n:.1%}',
+                                 val_acc=f"{validation['accuracy']:.1%}", refresh=False)
     checkpoint = torch.load(run_dir / 'checkpoint.pt', map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model'])
     model.to(device)
@@ -222,6 +230,7 @@ def run_training(config, bundle, split, run_dir):
     result = {
         'schema_version': 2, 'status': 'completed', 'dataset': config['dataset'],
         'model': config['model'], 'attention': config['attention'], 'model_variant': config['model_variant'], 'seed': seed,
+        'subject_id': config.get('subject_id'),
         'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
         'parameter_count': sum(p.numel() for p in model.parameters()),
         'trainable_parameter_count': sum(p.numel() for p in model.parameters() if p.requires_grad),
@@ -263,6 +272,14 @@ def completed_run(run_dir, config):
 
 
 def run_experiment(config, skip_completed=False):
+    from .config import resolve_experiments
+    results = []
+    for experiment in resolve_experiments(config):
+        results.extend(_run_experiment(experiment, skip_completed))
+    return results
+
+
+def _run_experiment(config, skip_completed=False):
     from .config import resolve_config
     from .models import get_model_spec
     config = resolve_config(config)
@@ -289,7 +306,10 @@ def run_experiment(config, skip_completed=False):
         resolved.update(seeds=[seed], dataset_fingerprint=bundle.fingerprint,
                         expected_split_id=split['split_id'], resolved_metadata=bundle.metadata,
                         provenance=current_provenance)
-        run_dir = Path(config['output_dir']) / config['dataset'] / f"{config['model']}-{config['attention']}-{experiment_identity(resolved)}" / f'seed_{seed}'
+        output = Path(config['output_dir']) / config['dataset']
+        if config.get('subject_id'):
+            output = output / f"subject_{config['subject_id']}"
+        run_dir = output / f"{config['model']}-{config['attention']}-{experiment_identity(resolved)}" / f'seed_{seed}'
         with run_directory(run_dir):
             previous = completed_run(run_dir, resolved) if skip_completed else None
             if previous is not None:

@@ -8,4 +8,5 @@ DEFAULTS = {
     "eeg_temporal_bins": 8,
     "eeg_kernel_size": 15,
     "ecg_patch_size": 16,
+    "spatial_readout": "learned",
 }

@@ -1,0 +1,12 @@
+{
+  "model": "eegnet",
+  "attention": "agfl",
+  "dataset": "eeg",
+  "device": "cuda",
+  "seeds": [0, 1, 2, 3, 4],
+  "data": {
+    "data_dir": "../ml",
+    "sessions": ["T", "E"]
+  },
+  "split": {"protocol": "session", "validation_within_train": 0.2}
+}

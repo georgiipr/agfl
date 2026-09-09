@@ -58,7 +58,7 @@ The factory inserts the chosen mechanism at the model's attention locations
 and isolates initialization RNG so attention capacity does not shift common
 backbone weights. Splits and training policy are shared.
 
-EEG uses electrode tokens by default; ECG uses time tokens. These adaptations
+EEG uses electrode tokens and learned spatial readouts by default; ECG uses time tokens. These adaptations
 change surrounding feature extraction and readout where needed. See
 [model structure and architecture changes](docs/model_attention_structure.md).
 Preserving AGFL's equations does not imply full-original-backbone parity.
@@ -78,17 +78,42 @@ Use Python 3.12+ and a suitable PyTorch/CUDA environment. If installation is
 needed there: `python -m pip install -e '.[dev,plots]'`. Dependencies are defined
 in `pyproject.toml`; preserve a target-compatible lock and the installed versions.
 
-One model with one attention, using all nine EEG subjects and five seeds:
+Activate your existing environment in each new cluster shell. For the environment
+at `~/.venv` used in earlier runs:
+
+```bash
+source ~/.venv/bin/activate
+python --version
+command -v python
+```
+
+The version must be 3.12 or newer and the executable should belong to that
+environment. An older system Python can report `SyntaxError` at a valid f-string
+before loading any model. The package now checks the interpreter version before
+importing the CLI and reports an explicit environment error.
+
+BCI IV 2a is trained **separately for each subject**. This command runs one
+model and one attention for A01, then A02, through A09, with five independent
+seeds per subject: **9 subjects × 5 seeds = 45 runs**. Subjects are never pooled
+into one model. Every subject has separate train, validation and test trials.
 
 ```bash
 python main.py run --preset eeg --model eegnet --attention agfl --output-dir results/eegnet-eeg
 ```
 
-A short execution check with three subjects and one seed:
+In an interactive terminal, each subject/seed run has one updating epoch progress
+bar showing the model, attention, subject, seed, elapsed time, estimated remaining
+time, training loss, training accuracy and validation accuracy. It leaves one
+completed bar per run instead of printing a line every epoch. Bars are disabled
+automatically when stderr is redirected (for example, to a batch-job log).
+All epoch metrics are still saved to `history.json`. The `tqdm` dependency is
+installed by the package installation command above.
+
+A short execution check with one subject and one seed (not an accuracy study):
 
 ```bash
 python main.py run --preset eeg --model eegnet --attention agfl --seeds 0 \
-  --set 'data.subjects=[1,2,3]' --set training.epochs=2 \
+  --set 'data.subjects=[1]' --set training.epochs=2 \
   --output-dir results/quick-eegnet-eeg
 ```
 
@@ -102,6 +127,9 @@ python main.py run --preset ecg --model conformer --attention agfl
 The EEG preset defaults to EEGNet; the ECG preset defaults to Conformer.
 Both use AGFL unless overridden. To run another backbone on either modality,
 change `--model`. `model_variant` is inferred from the dataset.
+To run selected EEG subjects, add `--set 'data.subjects=[1,3]'`; this creates
+two independent subject experiments. To select one seed, add `--seeds 0`.
+Omitting these options runs all nine subjects and five seeds.
 Inspect available keys and resolved settings:
 
 ```bash
@@ -122,7 +150,9 @@ python main.py sweep --preset eeg-comparison --model eegencoder --output-dir res
 python main.py sweep --preset ecg-comparison --model conformer --output-dir results/conformer-comparison
 ```
 
-Each command runs **one model × five attentions × five seeds = 25 runs**.
+Each EEG comparison runs **one model × nine subjects × five attentions × five
+seeds = 225 runs**, always training subjects separately. Each ECG comparison
+runs **one model × five attentions × five seeds = 25 runs** on patient-group splits.
 The surrounding model, heads, training policy and splits are held fixed.
 Parameter counts may differ and are recorded. Use `run` for one attention.
 Identical resolved sweep configurations are executed only once, including when
@@ -171,9 +201,12 @@ are `random_features` (Performer), `projection_rank` (Linformer), and
 
 ## Protocol and saved results
 
-Default seeds are 0–4. Persisted 60/20/20 subject-group splits are reused for
-matching dataset settings and seeds. Nine EEG subjects yield five/two/two
-subjects. ECG records 201 and 202 stay together as one patient.
+Default seeds are 0–4. For BCI IV 2a, each subject's T-session trials receive a
+persisted, class-stratified 60/20/20 train/validation/test split, rounded per class.
+These are **within-subject T-session results**, not official T-to-E session
+transfer results. The same subject and seed use identical samples for every
+model and attention. A pooled-subject/group-split BCI training request is rejected.
+ECG retains patient-group 60/20/20 splitting; records 201 and 202 stay together.
 Validation selects the checkpoint; test is evaluated once after restoration.
 
 Training defaults are EEG 250 epochs/LR 0.005/focal gamma 3 and ECG
@@ -183,20 +216,44 @@ Focal loss uses unweighted target probability and training-derived class weights
 ECG presets add training-only shift/scale/noise augmentation. AMP is opt-in;
 determinism remains strict. These budgets are starting settings, not tuned claims.
 
-For subject-dependent EEG use `data.subjects=[1]` and
-`split.protocol=stratified`. For T-to-E transfer use `data.sessions=["T","E"]`,
-the official labels and `split.protocol=session`. See the
-[dataset audit](docs/data_audit.md) for filtering, normalization and exclusions.
+EEG defaults now use the 0–4 s window after cue onset (1,000 samples at 250 Hz),
+2–30 Hz filtering **within each trial**, exclusion of expert-marked artifacts,
+and channel normalization fitted on the training partition only. This preserves
+relative trial amplitudes and avoids filtering across held-out trials. These
+settings change the dataset fingerprint. ECG retains 0.5–45 Hz filtering per
+record, MLII selection, 256-sample beat windows and per-beat/channel normalization.
+NPZ adapters require `[N,C,T]` signals and explicit labels/groups; use
+`data.normalization=none` for already-preprocessed arrays when appropriate.
+
+For T-to-E transfer, put the official `A01E.mat` ... `A09E.mat` class labels in
+`../ml`, or supply their directory below. It still trains each subject separately;
+T is split 80/20 for train/validation and E is used only for test:
+
+```bash
+python main.py run --preset eeg-session --model eegnet --attention agfl \
+  --set data.labels_dir=../official-labels --output-dir results/eegnet-session
+```
+
+Omit the labels override if `.mat` files are beside the GDF files. Missing labels
+are an error; they are never inferred. See the [dataset audit](docs/data_audit.md).
 
 ```text
-results/<dataset>/<model>-<attention>-<experiment_id>/seed_<seed>/
+<output-dir>/eeg/subject_A01/<model>-<attention>-<experiment_id>/seed_<seed>/
   config.json          complete settings, provenance and metadata
   split.json           indices, sample IDs, subject groups and fingerprints
-  history.json         losses, validation metrics, LR and AMP skipped steps
+  history.json         train loss/accuracy, validation metrics, LR, AMP skipped steps
   checkpoint.pt        selected weights, buffers and normalization state
   predictions.npz      validation/test probabilities, targets and sample IDs
   result.json          metrics, parameter counts, model and attention locations
 ```
+
+Each EEG subject gets its own `subject_Axx` directory. ECG keeps
+`<output-dir>/ecg/<model>-<attention>-<experiment_id>/seed_<seed>/`.
+EEGNet now has a residual path around attention in both modalities. EEG models
+use learned, signed electrode filters for spatial readout rather than uniformly
+averaging all electrodes. AGFL equations are unchanged. These are new model
+settings and require new training; old checkpoints are reconstructed with their
+previous readout behavior for diagnostics, never silently upgraded.
 
 Relaunching the same configuration and seed **overwrites that seed's generated
 artifacts by default**, including completed runs. Aborted or failed runs restart
@@ -219,24 +276,101 @@ previous results. These are inference checkpoints, not optimizer-resume files.
 
 ## Tables and all plots
 
+**Training does not generate images automatically.** After training, run both
+steps below on the cluster. `analyze --plots` uses saved artifacts only;
+`diagnose` additionally loads checkpoints and the original recordings. Neither
+trains a model. The CLI prints the result-plot command when training finishes.
+
+Install plotting dependencies in the active Python 3.12+ environment once:
+
 ```bash
-python main.py analyze results/eegnet-comparison --output-dir analysis/eegnet --plots
-python main.py diagnose results/eegnet-comparison/eeg/eegnet-agfl-EXPERIMENT_ID/seed_0 \
-  --output-dir analysis/eegnet-diagnostics
+python -m pip install -e '.[plots,umap]'
 ```
 
-Replace `EXPERIMENT_ID` with the actual directory suffix.
-Analysis exports CSV/JSON/Markdown, mean/sample SD, paired t/Wilcoxon tests,
-effect sizes, Holm-adjusted p-values and pairing diagnostics. Comparisons hold
-the actual backbone fixed. Repeated overlapping splits make seed-level inference
-exploratory; see [statistics](docs/statistics.md).
+**1. Result figures and tables for every subject and seed.** From `AGFL`, use
+the same result root as the training command:
 
-`analyze --plots` produces learning curves, confusion/ROC, seed comparisons,
-ablations, capacity plots, paired differences and available per-subject metrics.
-It only reads saved artifacts. `diagnose` loads one checkpoint and recordings
-for signal spectra, scalp/CSP maps, embeddings, attention maps and AGFL
-coefficients/projections. It defaults to a validation subset and CPU.
-Both export PNG/PDF and an index. See [plot coverage](docs/visualization.md).
+```bash
+python main.py analyze results/eegnet-eeg --output-dir analysis/eegnet-eeg --plots
+```
+
+Open **`analysis/eegnet-eeg/figures/index.md`** for PNG previews and PDF links.
+The main table is **`analysis/eegnet-eeg/report.md`**. CSV/JSON exports include
+`per_subject.csv` (mean/sample SD over seeds for each subject),
+`across_subjects.csv` (equal-weight mean of subject means and between-subject SD),
+`per_model.csv`, `attention_comparison.csv`, `agfl_ablations.csv`,
+`statistical_comparisons.csv`, and `aggregation.json`. Unequal completed seed
+sets across subjects are flagged; no overall score is silently fabricated.
+Subject summaries identify the subjects actually present, including partial studies.
+
+For the existing downloaded study, whose root was simply `results`, use:
+
+```bash
+python main.py analyze results --output-dir analysis/existing-results --plots
+```
+
+Old runs remain labeled with their original cohort and protocol; they are not
+reinterpreted as individual-subject experiments.
+
+**2. Signal, embedding and attention diagnostics for every completed run.**
+This loop discovers the actual subject/experiment/seed paths; there are no IDs
+to edit manually. Run it from `AGFL` in Bash on the cluster:
+
+```bash
+task_results_root=results/eegnet-eeg
+task_diagnostics_root=analysis/eegnet-eeg/diagnostics
+find "$task_results_root" -type f -name result.json -print0 |
+while IFS= read -r -d '' task_result_file; do
+  task_run_dir=${task_result_file%/result.json}
+  task_relative_run=${task_run_dir#"$task_results_root"/}
+  python main.py diagnose "$task_run_dir" \
+    --output-dir "$task_diagnostics_root/$task_relative_run" \
+    --device cuda --partition validation --embedding tsne || break
+done
+```
+
+Each output directory contains **`index.md`**, PNG/PDF files and `manifest.json`.
+The loop reloads recordings for each checkpoint, so it takes longer than step 1.
+To inspect one run first, copy its directory path from the result tree:
+
+```bash
+python main.py diagnose PATH_TO_ONE_SEED_DIRECTORY \
+  --output-dir analysis/one-run-diagnostics --device cuda
+```
+
+Use `--device cpu` for CPU diagnostics, `--embedding pca|tsne|umap`, and
+`--max-samples 512` to change the diagnostic subset (default 256). The default
+partition is validation. If recordings moved, add `--data-dir /new/data/path`;
+for E-session labels add `--labels-dir /new/labels/path`, or for NPZ data use
+`--data-path /new/dataset.npz`. Data content must still match the training run.
+
+**3. Add sparsity/entropy-versus-accuracy figures** after step 2:
+
+```bash
+python main.py analyze results/eegnet-eeg --output-dir analysis/eegnet-eeg --plots \
+  --diagnostics-root analysis/eegnet-eeg/diagnostics
+```
+
+| Figures | Generated by | Required artifacts |
+|---|---|---|
+| Learning curves, train accuracy, validation Accuracy/AUC/F1, LR, selected epoch | `analyze --plots` | Histories; train accuracy exists only in new runs |
+| Validation/test confusion matrices and class ROC curves | `analyze --plots` | Predictions and split manifests |
+| Seed summaries, subject scores, capacity plots | `analyze --plots` | Completed results |
+| Attention comparisons, paired differences and ablations | `analyze --plots` | Matching baseline/ablation experiments; one AGFL setting cannot provide these comparisons |
+| Example signals, spectra, EEG alpha/beta scalp maps, C3/C4 time-frequency maps, training-fitted CSP | `diagnose` | Checkpoint, matching recordings and channel metadata |
+| PCA/t-SNE/UMAP, per-head graph maps, AGFL coefficients and projections | `diagnose` | Checkpoint and matching recordings |
+| Sparsity/entropy versus accuracy | Step 3 | Matching verified diagnostic manifests |
+
+`manifest.json` lists unavailable figures and their reasons (missing metadata,
+undefined entropy, or absent comparison runs). It is not evidence that a missing
+baseline was trained. Result statistics use paired t/Wilcoxon tests, effect sizes
+and Holm corrections only for matching subject/seed/split/model/protocol pairs.
+Repeated overlapping splits make seed-level inference exploratory; see
+[statistics](docs/statistics.md).
+
+After overwriting training runs, rerun these plotting steps to refresh exports.
+Download the `analysis` directory as well as `results` to obtain the images.
+Detailed figure meanings and limits are in [plot coverage](docs/visualization.md).
 
 Earlier v1 results remain readable and are labeled with their actual backbone
 and attention without rewriting saved identities. Earlier mechanism-as-model
@@ -267,7 +401,8 @@ an attention package exposing `AttentionSpec` with defaults and a
 Dataset loaders register separately and return explicit `[N,C,T]` arrays,
 contiguous class labels, subject groups and stable sample IDs.
 
-See [pipeline findings](docs/pipeline_audit.md),
+See [current model and preprocessing corrections](docs/subject_model_preprocessing_audit.md),
+[pipeline findings](docs/pipeline_audit.md),
 [mathematical definitions](docs/mathematics.md), and
 [request status](docs/request_status.md) for scientific limits and remaining
 target-machine acceptance work.

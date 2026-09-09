@@ -274,6 +274,13 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
                              if k in get_attention_spec(attention_key).defaults}
     else:
         model_options, attention_options = config['model_options'], config['attention_options']
+    # Saved checkpoints predating spatial readouts must reconstruct their original
+    # forward path. Only construction settings change; saved identities stay intact.
+    model_options = copy.deepcopy(model_options)
+    defaults = spec.defaults_for(config['model_variant'])
+    for key, previous in {'spatial_readout': 'mean', 'attention_residual': False}.items():
+        if key in defaults and key not in model_options:
+            model_options[key] = previous
     checkpoint_path = directory / 'checkpoint.pt'
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     if checkpoint['config'] != config or checkpoint['split_id'] != split['split_id']:

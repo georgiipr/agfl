@@ -18,6 +18,7 @@ TRAINING_DEFAULTS = {
     "augmentation": {"shift": 0, "scale": 0.0, "noise": 0.0},
 }
 DEFAULTS = {
+    "subject_id": None,
     "schema_version": 2, "model": "eegnet", "attention": "agfl", "dataset": "eeg", "model_variant": "auto",
     "seeds": [0, 1, 2, 3, 4], "deterministic": True, "device": "cuda", "threads": 1,
     "output_dir": "results", "split_dir": "splits", "data": {}, "model_options": {}, "attention_options": {},
@@ -81,8 +82,8 @@ def resolve_config(config):
     unknown = set(config) - allowed
     if unknown:
         raise ValueError(f"Unknown configuration keys: {sorted(unknown)}")
-    resolved = merge(DEFAULTS, config)
-    dataset_spec = get_dataset_spec(resolved["dataset"])
+    dataset_spec = get_dataset_spec(config.get('dataset', DEFAULTS['dataset']))
+    resolved = merge(merge(DEFAULTS, dataset_spec.experiment_defaults or {}), config)
     model_spec = get_model_spec(resolved["model"])
     family = model_spec.comparison_family or model_spec.key
     if config.get('comparison_family') not in (None, family):
@@ -165,6 +166,14 @@ def resolve_config(config):
         if resolved["data"].get(key):
             resolved["data"][key] = str(Path(resolved["data"][key]).expanduser().resolve())
     return resolved
+
+
+def resolve_experiments(config):
+    """Dataset-owned expansion is shared by CLI previews and Python launches."""
+    from .datasets import get_dataset_spec
+    resolved = resolve_config(config)
+    expand = get_dataset_spec(resolved['dataset']).expand_experiments
+    return expand(resolved) if expand is not None else [resolved]
 
 
 def experiment_identity(config):

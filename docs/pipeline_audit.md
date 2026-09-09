@@ -5,6 +5,11 @@ evaluation, or tests were executed locally. Numerical and real-data acceptance
 checks are supplied for the intended experiment environment. No accuracy gain,
 behavioral parity result, or statistical significance is claimed.
 
+The latest [subject/model/preprocessing corrections](subject_model_preprocessing_audit.md)
+supersede the earlier pooled EEG defaults. BCI IV 2a now trains each subject
+independently, adds learned EEG spatial readouts and preserves a direct EEGNet
+feature path around attention. The AGFL equations are unchanged.
+
 ## Original execution path
 
 `main.py` seeded Python/NumPy/Torch once, enabled cuDNN benchmarking, then

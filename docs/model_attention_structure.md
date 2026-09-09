@@ -7,11 +7,11 @@ Signal Transformer for EEGNet or another selected model.
 
 | Model | EEG default | ECG default |
 |---|---|---|
-| EEGNet | Temporal/depthwise/separable convolutions per electrode; attention over flattened electrode features; mean electrode readout. | Convolutions combine leads and pool time; attention over pooled time tokens; flattened readout. |
-| EEGEncoder | Convolution and causal TCN per electrode; electrode attention in parallel with local features; fused mean readout. | Convolution across leads, parallel causal TCN and positional temporal attention; fused readout. |
-| DSTS EEGEncoder | Down-projection and branch-specific causal features per electrode; each branch's transformer mixes electrodes; ensemble of branch logits. | Down-projection across leads; branch-specific causal and temporal-attention paths; ensemble of logits. |
-| Conformer | Per-electrode temporal stem, pooling and embedding; Conformer blocks attend over electrodes with pointwise convolution; mean+max readout. | Input lead projection and Conformer temporal attention/depthwise convolution; mean+max readout. |
-| Signal Transformer | Per-electrode temporal convolution/pooling; residual attention/FFN blocks. | Strided temporal patch embedding followed by residual attention/FFN blocks. |
+| EEGNet | Per-electrode convolutions; residual electrode attention; learned spatial filters shared across time bins. | Lead-spanning convolutions; residual temporal attention; flattened readout. |
+| EEGEncoder | Per-electrode convolution/TCN; local and attention features share a learned spatial readout. | Convolution across leads, parallel causal TCN and temporal attention; fused readout. |
+| DSTS EEGEncoder | Per-electrode down-projection; branch-specific TCN, electrode attention and learned spatial readout; logit ensemble. | Down-projection across leads; temporal/attention branches; logit ensemble. |
+| Conformer | Per-electrode temporal stem; electrode attention and pointwise convolution; learned spatial readout plus max. | Lead projection; temporal attention/depthwise convolution; mean+max readout. |
+| Signal Transformer | Per-electrode temporal encoding; residual attention/FFN; learned spatial readout. | Temporal patch embedding; residual attention/FFN; mean temporal readout. |
 
 Every attention module consumes and returns [batch, tokens, features].
 The same five attention implementations work at each location. Heads must divide
@@ -27,7 +27,15 @@ and readout adaptations are intentional new variants. ECG variants of the three
 EEG families also introduce explicit lead/time shapes and suitable pooling.
 EEGNet, EEGEncoder and DSTS add fixed positional encoding to electrode tokens;
 this preserves channel identity through shared per-electrode extraction and
-mean readout. Conformer and Signal Transformer use learned position embeddings.
+spatial readout. Conformer and Signal Transformer use learned position embeddings.
+
+All electrode variants now use feature-specific signed spatial filters
+(`model_options.spatial_readout=learned`). EEGNet shares electrode weights across
+pooled time bins and constrains their max norm. Its `attention_residual=true`
+preserves the local signal and its gradients when AGFL taps are zero, for EEG
+and ECG. AGFL equations are unchanged. These are architecture revisions, not
+demonstrated accuracy gains. Older checkpoints reconstruct the previous mean
+readout and EEGNet non-residual path using their saved configuration.
 
 EEGNet no longer executes a training-mode dummy forward to calculate classifier
 size. Nondefault f2 uses a valid depthwise/separable convolution. Max-norm
@@ -43,7 +51,7 @@ EEGNet, EEGEncoder and DSTS EEG variants expose
 the comparison identity and must be treated as a different architecture.
 It does not promise original behavior for every corrected implementation.
 Frozen-weight parity checks specifically cover EEGNet with its original default
-dimensions and temporal placement, and Conformer ECG. They avoid conflating
+dimensions, temporal placement and `attention_residual=false`, and Conformer ECG. They avoid conflating
 controlled forward behavior with changed initialization/training policies.
 
 Original independent sources are retained under tests/references. AGFL layer

@@ -18,13 +18,14 @@ from agfl.visualization.results import generate_result_plots, paired_differences
 from tests.model_fixtures import small_model_options
 
 
-def saved_fixture(tmp_path, model_key='signal_transformer', attention='agfl', axis=None):
+def saved_fixture(tmp_path, model_key='signal_transformer', attention='agfl', axis=None, model_options=None):
     directory = tmp_path / 'runs' / 'seed_0'
     directory.mkdir(parents=True)
     config = resolve_config({
         'model': model_key, 'attention': attention, 'dataset': 'synthetic_eeg', 'device': 'cpu', 'seeds': [0],
         'data': {'subjects': 3, 'samples_per_subject': 8, 'channels': 4, 'samples': 65},
-        'model_options': {**small_model_options(model_key, 'eeg'), **({'attention_axis': axis} if axis else {})},
+        'model_options': {**small_model_options(model_key, 'eeg'), **({'attention_axis': axis} if axis else {}),
+                          **(model_options or {})},
         'attention_options': {'heads': 2},
         'output_dir': str(tmp_path / 'runs'), 'split_dir': str(tmp_path / 'splits'),
     })
@@ -68,6 +69,25 @@ def test_predictions_must_match_saved_split_order(tmp_path):
     np.savez_compressed(directory / 'predictions.npz', **values)
     with pytest.raises(ValueError, match='sample order'):
         read_predictions(run, 'test')
+
+
+def test_old_eegnet_checkpoint_keeps_original_readout_for_diagnostics(tmp_path):
+    pytest.importorskip('matplotlib')
+    directory, run = saved_fixture(tmp_path, 'eegnet', model_options={
+        'spatial_readout': 'mean', 'attention_residual': False})
+    config = run['config']
+    config['model_options'].pop('spatial_readout')
+    config['model_options'].pop('attention_residual')
+    checkpoint = torch.load(directory / 'checkpoint.pt', weights_only=False)
+    checkpoint['config'] = config
+    torch.save(checkpoint, directory / 'checkpoint.pt')
+    write_json(directory / 'config.json', config)
+    run.update(experiment_id=experiment_identity(config), comparison_id=comparison_identity(config))
+    write_json(directory / 'result.json', {k: v for k, v in run.items() if k != 'source'})
+    output = tmp_path / 'old-checkpoint-plots'
+    diagnose_run(directory, output, embedding='pca', max_samples=8)
+    manifest = json.loads((output / 'manifest.json').read_text())
+    assert manifest['prediction_check']['matches']
 
 
 def test_paired_plot_excludes_mismatched_splits_and_undefined_metrics():

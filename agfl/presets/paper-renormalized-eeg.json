@@ -1,5 +1,6 @@
 {
   "model": "eegnet",
+  "split": {"protocol": "stratified"},
   "dataset": "eeg",
   "device": "cuda",
   "output_dir": "results/paper-renormalized",

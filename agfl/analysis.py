@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 from scipy import stats
 from .storage import write_json
-from .config import comparison_identity, experiment_identity, experiment_selection
+from .config import comparison_identity, experiment_identity, experiment_selection, digest
 
 METRICS = ('accuracy', 'roc_auc', 'f1')
 PRIMARY = {'mha', 'performer', 'linformer', 'nystromformer'}
@@ -69,6 +69,48 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def subject_aggregates(runs):
+    """Equal-weight subject means; never treat subject x seed as independent people."""
+    cohorts = defaultdict(list)
+    for run in runs:
+        config = run['config']
+        if not config.get('subject_id'):
+            continue
+        settings = {key: config[key] for key in (
+            'dataset', 'model', 'attention', 'model_variant', 'model_options',
+            'attention_options', 'training', 'split', 'comparison_family',
+            'deterministic', 'device', 'threads')}
+        settings['data'] = {k: v for k, v in config['data'].items() if k != 'subjects'}
+        settings['provenance'] = {k: config.get('provenance', {}).get(k) for k in ('source_sha256', 'packages')}
+        cohorts[digest(settings)[:20]].append(run)
+    output = []
+    for cohort, records in sorted(cohorts.items()):
+        subjects = sorted({r['config']['subject_id'] for r in records})
+        seed_sets = {s: sorted(r['seed'] for r in records if r['config']['subject_id'] == s) for s in subjects}
+        if any(len(seeds) != len(set(seeds)) for seeds in seed_sets.values()):
+            raise ValueError('Duplicate subject/seed in a subject summary')
+        # Different seed coverage is disclosed and must not produce a deceptively
+        # complete overall score; individual rows remain available.
+        same_seeds = all(seeds == seed_sets[subjects[0]] for seeds in seed_sets.values())
+        for partition, metric in itertools.product(('validation', 'test'), METRICS):
+            means = []
+            for subject in subjects:
+                values = [r[partition].get(metric) for r in records if r['config']['subject_id'] == subject]
+                if all(v is not None for v in values):
+                    means.append(float(np.mean(values)))
+            complete = same_seeds and len(means) == len(subjects)
+            output.append({
+                'cohort_id': cohort, 'dataset': records[0]['dataset'], 'model': records[0]['backbone_key'],
+                'attention': records[0]['attention_key'], 'partition': partition, 'metric': metric,
+                'subjects': subjects, 'n_subjects': len(subjects), 'seeds_by_subject': seed_sets,
+                'complete_seed_coverage': same_seeds,
+                'mean_of_subject_means': float(np.mean(means)) if complete else None,
+                'between_subject_sd': float(np.std(means, ddof=1)) if complete and len(means) > 1 else None,
+                'reason': None if complete else 'Unequal seed coverage or undefined subject metrics',
+            })
+    return output
+
+
 def analyze_results(input_root, output_dir):
     paths = sorted(Path(input_root).rglob('result.json'))
     if not paths:
@@ -91,6 +133,8 @@ def analyze_results(input_root, output_dir):
             raise ValueError(f'Result attention differs from saved configuration: {path}')
         if r['config']['seeds'] != [r['seed']] or r['config']['expected_split_id'] != r['split_id']:
             raise ValueError(f'Result seed/split differs from the saved configuration: {path}')
+        if r.get('subject_id') != r['config'].get('subject_id'):
+            raise ValueError(f'Result subject differs from the saved configuration: {path}')
         identity = r['experiment_id'], r['seed']
         if identity in seen:
             raise ValueError(f'Duplicate experiment/seed would create pseudoreplication: {path}')
@@ -112,7 +156,7 @@ def analyze_results(input_root, output_dir):
         if len(provenance) > 1:
             raise ValueError(f'Source code differs across seeds within {experiment}')
         summary = {k: first[k] for k in ('dataset', 'model', 'model_variant', 'experiment_id', 'comparison_id', 'parameter_count')}
-        summary.update(model=first['backbone_key'], attention=first['attention_key'])
+        summary.update(model=first['backbone_key'], attention=first['attention_key'], subject_id=first['config'].get('subject_id'))
         summary.update(n_seeds=len(records), seeds=sorted(r['seed'] for r in records),
                        model_options=first['config']['model_options'],
                        attention_options=first['config'].get('attention_options', {}), metrics={})
@@ -150,6 +194,7 @@ def analyze_results(input_root, output_dir):
                 pairs = [(a, b) for a, b in pairs if a is not None and b is not None]
                 stat = paired_statistics([a for a, b in pairs], [b for a, b in pairs])
                 stat.update(dataset=first['dataset'], model=first['backbone_key'], model_variant=first['model_variant'],
+                            subject_id=first['config'].get('subject_id'),
                             agfl_experiment_id=agfl_id, baseline_experiment_id=baseline_id,
                             baseline=first['attention_key'], metric=metric, comparison_id=first['comparison_id'],
                             n_unmatched_agfl=len(a_map.keys() - b_map.keys()),
@@ -163,24 +208,41 @@ def analyze_results(input_root, output_dir):
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     paired_ids = {row[key] for row in comparisons for key in ('agfl_experiment_id', 'baseline_experiment_id')}
+    across_subjects = subject_aggregates(runs)
     result = {'schema_version': 2, 'n_runs': len(runs), 'experiments': summaries, 'comparisons': comparisons,
+              'across_subjects': across_subjects,
               'experiments_without_comparable_counterpart': sorted(set(groups) - paired_ids),
               'sources': [r['source'] for r in runs],
               'methodology': 'Sample SD (ddof=1); paired AGFL minus baseline; two-sided tests; Wilcoxon differences rounded to 12 decimals; Holm family includes all supplied comparisons and metrics separately per test. Repeated overlapping splits are dependent, so seed-level inference is exploratory.'}
     write_json(output / 'aggregation.json', result)
     write_csv(output / 'per_model.csv', flat)
+    write_csv(output / 'per_subject.csv', [r for r in flat if r.get('subject_id')])
+    write_csv(output / 'across_subjects.csv', [{**row, 'subjects': json.dumps(row['subjects']),
+               'seeds_by_subject': json.dumps(row['seeds_by_subject'], sort_keys=True)} for row in across_subjects])
     write_csv(output / 'attention_comparison.csv', [r for r in flat if r['attention'] in PRIMARY | {'agfl'}])
     write_csv(output / 'agfl_ablations.csv', [r for r in flat if r['attention'] == 'agfl'])
     write_csv(output / 'statistical_comparisons.csv', comparisons)
     lines = ['# Saved experiment analysis', '', result['methodology'], '',
-             '| Dataset | Model | Attention | Seeds | Parameters | Accuracy | ROC-AUC | Macro F1 |',
-             '|---|---|---|---:|---:|---:|---:|---:|']
+             '| Dataset | Subject | Model | Attention | Seeds | Parameters | Accuracy | ROC-AUC | Macro F1 |',
+             '|---|---|---|---|---:|---:|---:|---:|---:|']
     for row in summaries:
         formatted = []
         for metric in METRICS:
             value = row['metrics'][f'test_{metric}']
             formatted.append('undefined' if value['mean'] is None else f"{value['mean']:.4f} ± " + (f"{value['std']:.4f}" if value['std'] is not None else 'undefined'))
-        lines.append(f"| {row['dataset']} | {row['model']} ({row['experiment_id'][:8]}) | {row['attention']} | {row['n_seeds']} | {row['parameter_count']} | " + ' | '.join(formatted) + ' |')
+        lines.append(f"| {row['dataset']} | {row.get('subject_id') or 'cohort'} | {row['model']} ({row['experiment_id'][:8]}) | {row['attention']} | {row['n_seeds']} | {row['parameter_count']} | " + ' | '.join(formatted) + ' |')
+    if across_subjects:
+        lines += ['', '## Equal-weight subject summaries', '',
+                  'Average seeds within each subject first. SD below is between subject means, not across all subject/seed runs.', '',
+                  '| Model | Attention | Subjects | Metric | Test mean | Between-subject SD |',
+                  '|---|---|---|---|---:|---:|']
+        for row in across_subjects:
+            if row['partition'] != 'test':
+                continue
+            mean, sd = row['mean_of_subject_means'], row['between_subject_sd']
+            lines.append(f"| {row['model']} | {row['attention']} | {', '.join(row['subjects'])} | {row['metric']} | "
+                         + ('unavailable' if mean is None else f'{mean:.4f}') + ' | '
+                         + ('unavailable' if sd is None else f'{sd:.4f}') + ' |')
     lines += ['', 'Full configurations and pairing diagnostics are in aggregation.json; raw and Holm-adjusted p-values and effect sizes are in statistical_comparisons.csv.',
               'Synthetic fixtures and short smoke runs are validation artifacts, not estimates of scientific performance.']
     (output / 'report.md').write_text('\n'.join(lines) + '\n')

@@ -11,14 +11,14 @@ validation remains pending on the intended machine.
 | Remove archived model names | Production adapters and their presets removed. Original sources remain only in tests/references for independent checks; they are not installed or selectable. |
 | Five attentions inside each chosen model | AGFL, MHA, Performer, Linformer and Nyströmformer are injected at the model's attention locations. Comparison presets hold the backbone fixed. |
 | Shared data/train/evaluate policy | ModelSpec entry methods delegate to common loaders and engine. |
-| Five seeds, same persisted splits, subject independence | Defaults and manifests implemented; runtime repeatability checks pending. |
+| Five seeds and identical persisted splits | BCI IV 2a: separate experiment per subject, stratified T or T-to-E splits. ECG: patient groups. Runtime checks pending. |
 | Preserve AGFL mathematics | Active original polynomial defaults preserved. Independent forward/gradient checks supplied; no measured parity claim yet. |
 | EEG inter-electrode / ECG temporal analysis | Explicit default axes in every model; required architecture adaptations documented in model_attention_structure.md. |
 | Ablations | Attention settings and EEG/ECG matrices implemented. No-attention deliberately absent following the explicit removal instruction. |
 | Metrics and statistical comparisons | Saved-result aggregation, mean/sample SD, paired t/Wilcoxon, effects and Holm correction. Pairing requires the same actual backbone and protocol. |
 | Complete artifacts and replay | Config, checkpoint, history, predictions, split and result records with source/package/data identities. v2 replay checks supplied. |
 | Relaunch after abort without deleting results | Matching seed artifacts are replaced by default and training restarts from epoch 1. --skip-completed preserves matching finished seeds while restarting incomplete ones. Regression checks are supplied but unrun locally. |
-| Audit poor accuracy and original pipeline | Source findings documented in pipeline_audit.md and data_audit.md. Their measured effects remain unknown. |
+| Audit poor accuracy and original pipeline | Saved EEG results checked; subject protocol, spatial readouts, EEGNet gradient path and preprocessing corrected. See subject_model_preprocessing_audit.md. New accuracy remains unmeasured. |
 | Tables and plots | Saved-result figures and model-aware checkpoint diagnostics implemented; rendering checks pending. |
 | Earlier saved results | Read without changing original hashes/configs. Mechanism-as-model v1 runs are explicitly labeled Signal Transformer. |
 | Execute experiments and verify research behavior | Pending on target machine, as required by the prohibition on local execution. |

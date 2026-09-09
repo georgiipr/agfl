@@ -30,10 +30,13 @@ def load_ecg(config):
         raise ValueError("ECG records must be a nonempty unique list")
     if config["missing_lead"] not in {"skip", "error"}:
         raise ValueError("missing_lead must be skip or error")
-    window = int(config["window"])
-    if window < 2:
+    window = config["window"]
+    if type(window) is not int or window < 2:
         raise ValueError("ECG window must be at least two samples")
     label_map = config["label_map"]
+    if (not isinstance(label_map, dict) or not label_map or
+            any(not isinstance(k, str) or not k or type(v) is not int for k, v in label_map.items())):
+        raise ValueError('ECG label_map requires annotation strings mapped to integer class indices')
     class_values = sorted(set(label_map.values()))
     if class_values != list(range(len(class_values))) or len(class_values) < 2:
         raise ValueError("ECG label_map must use contiguous integer classes starting at zero")

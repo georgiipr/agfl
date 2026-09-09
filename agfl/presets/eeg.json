@@ -14,7 +14,7 @@
     "data_dir": "../ml"
   },
   "split": {
-    "protocol": "group",
+    "protocol": "stratified",
     "train": 0.6,
     "validation": 0.2,
     "test": 0.2
