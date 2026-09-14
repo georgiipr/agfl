@@ -146,6 +146,33 @@ labels are never inferred. ECG selects MLII by name and records missing leads.
 
 ## Improve EEGNet + AGFL on BCI IV 2a
 
+**Latest A01 result:** validation selection between `spatial_control` and
+`spatial_recombine` gives **71.64% mean test accuracy (SD 3.30 percentage
+points)** over five seeds, compared with 68.00% for the fixed spatial control.
+Augmentation is selected for four seeds. The 75% target remains unmet.
+The [augmentation review](docs/eegnet_a01_augmentation_review.md) includes
+the next fixed-procedure check on A03 and A06 and all subsequent plot commands.
+
+**A01 follow-up:** the spatial model averages **68.00% test accuracy (SD 3.30
+percentage points)** over seeds 0–4, compared with 49.82% for the earlier A01
+model. The next experiment isolates segment augmentation on this spatial
+configuration. The [five-seed review and complete plot commands](docs/eegnet_a01_spatial_seeds_review.md)
+describe the evidence and outputs. After updating the cluster checkout, run
+from `AGFL`:
+
+```bash
+python main.py tune-eegnet --data-dir ../ml --subjects 1 --seeds 0 1 2 3 4 \
+  --candidate spatial_control --candidate spatial_recombine \
+  --output-dir results/eegnet-A01-spatial-augmentation
+```
+
+This is **10 validation-only fits and five selected checkpoint test evaluations**,
+all for A01. `spatial_recombine` changes only training-trial segment
+recombination. Each seed's winner is chosen on validation. All other settings
+and trial IDs are held fixed. Its accuracy is unmeasured; the 75% target is
+still unmet. The new candidate is opt-in; the original five-candidate search
+below retains its previous scope.
+
 For the downloaded **46.76%** study, use this focused workflow. It keeps
 **EEGNet + AGFL, four classes and nine separately trained subjects**. The
 compact candidates restore early spatial filtering, preserve 31 time tokens,

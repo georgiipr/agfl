@@ -34,7 +34,7 @@ def main(argv=None):
     tune.add_argument('--output-dir', default='results/eegnet-bci2a-search')
     tune.add_argument('--subjects', type=int, nargs='+', default=list(range(1, 10)))
     tune.add_argument('--seeds', type=int, nargs='+', default=list(range(5)))
-    tune.add_argument('--candidate', action='append', help='Select a named candidate; repeat to choose several (default: all five)')
+    tune.add_argument('--candidate', action='append', help='Select a named candidate; repeat to choose several (default: original five; spatial_recombine is opt-in)')
     tune.add_argument('--epochs', type=int, help='Override epoch budget, e.g. 2 for a separate smoke check')
     tune.add_argument('--dry-run', action='store_true', help='Print configurations without loading recordings')
     tune.add_argument('--restart', action='store_true', help='Retrain completed candidates too; otherwise resume matching completed runs')

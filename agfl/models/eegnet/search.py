@@ -30,9 +30,17 @@ CANDIDATES = {
                                           'augmentation': {'recombine_segments': 8}}},
 }
 
+# Preserve the original five-candidate search and its resumable plan. Follow-up
+# candidates are opt-in so adding one does not expand existing launch commands.
+DEFAULT_CANDIDATES = tuple(CANDIDATES)
+CANDIDATES['spatial_recombine'] = merge(
+    CANDIDATES['spatial_control'],
+    {'training': {'augmentation': {'recombine_segments': 8, 'recombine_probability': .5}}},
+)
+
 
 def search_configs(data_dir, output_dir, subjects, seeds, candidates=None, epochs=None):
-    names = list(CANDIDATES) if candidates is None else list(candidates)
+    names = list(DEFAULT_CANDIDATES) if candidates is None else list(candidates)
     if not names or len(set(names)) != len(names) or set(names) - CANDIDATES.keys():
         raise ValueError(f'Choose unique EEGNet candidates from {list(CANDIDATES)}')
     base = load_preset('eegnet-bci2a')

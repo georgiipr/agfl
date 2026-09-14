@@ -71,6 +71,22 @@ def test_search_preview_does_not_load_data_or_train(monkeypatch, capsys, tmp_pat
             assert cfg['split'] == {'protocol': 'stratified', 'train': .6, 'validation': .2, 'test': .2}
 
 
+def test_spatial_augmentation_is_an_isolated_opt_in_comparison(tmp_path):
+    configs = search_configs(tmp_path, tmp_path / 'out', [1], list(range(5)),
+                             ['spatial_control', 'spatial_recombine'])
+    control = configs['spatial_control'][0]
+    augmented = deepcopy(configs['spatial_recombine'][0])
+    assert augmented['training']['augmentation']['recombine_segments'] == 8
+    assert augmented['training']['augmentation']['recombine_probability'] == .5
+    augmented['training']['augmentation']['recombine_segments'] = 0
+    # No change to model, loss, checkpoint rule, normalization, epoch budget,
+    # learning rate, split, seeds or any other augmentation option.
+    assert augmented == control
+    defaults = search_configs(tmp_path, tmp_path / 'default', [1], [0])
+    assert list(defaults) == ['spatial_control', 'compact_train_channel', 'compact_trialnorm',
+                              'compact_recombine', 'compact_recombine_slow']
+
+
 def test_recombination_uses_only_same_subject_class_training_donors():
     # Every channel/time position identifies its original donor unambiguously.
     x = np.arange(6, dtype=np.float32)[:, None, None] * 1000

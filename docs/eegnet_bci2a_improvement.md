@@ -79,6 +79,12 @@ at zero. New weights must be trained for the changed architecture.
 | `compact_recombine` | Add training-only segment recombination to `compact_trialnorm` |
 | `compact_recombine_slow` | Same augmentation with learning rate 0.0005 |
 
+An additional **opt-in** candidate, `spatial_recombine`, keeps all
+`spatial_control` settings and enables eight-segment training recombination
+with probability 0.5. Request both names with repeated `--candidate` arguments
+for the [A01 follow-up comparison](eegnet_a01_spatial_seeds_review.md).
+Omitting `--candidate` still launches only the original five candidates above.
+
 The control isolates the spatial/time layout change from the compact training
 recipe. The compact recipe changes several settings together and is not a
 factorial ablation attributing gains to each of them.
