@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 from scipy import stats
 from .storage import write_json
+from .result_paths import result_paths
 from .config import comparison_identity, experiment_identity, experiment_selection, digest
 
 METRICS = ('accuracy', 'roc_auc', 'f1')
@@ -112,12 +113,14 @@ def subject_aggregates(runs):
 
 
 def analyze_results(input_root, output_dir):
-    paths = sorted(Path(input_root).rglob('result.json'))
+    paths = result_paths(input_root)
     if not paths:
         raise ValueError(f'No saved result.json files under {input_root}')
     runs, groups = [], defaultdict(list)
     seen = set()
     for path in paths:
+        if path.with_name('failure.json').exists():
+            continue
         r = json.loads(path.read_text())
         if r.get('status') != 'completed':
             continue

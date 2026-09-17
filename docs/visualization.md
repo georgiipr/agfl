@@ -11,8 +11,11 @@ not regenerate them automatically.
 
 The README contains the full workflow, dependency installation, result figures,
 every-subject/every-seed diagnostics, output indexes and diagnostic comparisons.
-BCI runs now live under `eeg/subject_Axx/`; each subject trains separately. Old
-cohort results keep their original labels.
+BCI runs live under `artifacts/eeg/subject_Axx/`; each subject trains separately.
+Downloadable copies of their small records live under `report/runs`, with
+figures under `report/analysis` and `report/diagnostics`. Download **only
+`report/`**, retaining its folder structure. Old cohort results keep their
+original labels. See [session organization and existing-run migration](result_sessions.md).
 
 ## Figures from completed runs
 
@@ -20,7 +23,7 @@ Install the plotting extra on the analysis/experiment machine if needed:
 
 ```bash
 python -m pip install -e '.[plots]'
-python main.py analyze results/full-eeg --output-dir analysis/full-eeg --plots
+python main.py analyze results/full-eeg --plots
 ```
 
 This command needs saved results, histories, predictions, and split manifests.
@@ -38,7 +41,7 @@ It does not load recordings or model checkpoints. The generated figures include:
 | Subject scores | Each held-out subject's metrics within its run, where saved. |
 
 Each figure is exported as PNG and vector PDF. Open
-`analysis/full-eeg/figures/index.md` for previews. `manifest.json` identifies the
+`results/full-eeg/report/analysis/figures/index.md` for previews. `manifest.json` identifies the
 source runs, generated files, and unavailable figures. Runs with different
 comparison protocols are drawn separately. Test predictions from repeated,
 overlapping subject splits are never pooled into one apparent independent cohort.
@@ -51,11 +54,14 @@ Choose one seed directory containing `config.json`, `split.json`, and a trusted
 `checkpoint.pt` produced by this project. Substitute its actual experiment ID:
 
 ```bash
-python main.py diagnose results/full-eeg/eeg/eegnet-agfl-EXPERIMENT_ID/seed_0 \
-  --output-dir analysis/diagnostics/agfl-seed-0
+python main.py diagnose \
+  results/full-eeg/artifacts/eeg/subject_A01/eegnet-agfl-EXPERIMENT_ID/seed_0 \
+  --device cuda
 ```
 
-The command restores that checkpoint and reads the original dataset using the
+The default output mirrors the run path under `report/diagnostics`; use
+`--output-dir` only when another location is needed. The command restores
+that checkpoint and reads the original dataset using the
 saved preprocessing. Data content and split fingerprints must match. It defaults
 to CPU, validation samples, at most 256 class-balanced examples, and seeded
 t-SNE. These limits keep it separate from full-cohort evaluation. Options include
@@ -64,21 +70,18 @@ t-SNE. These limits keep it separate from full-cohort evaluation. Options includ
 Relocated recordings/labels/NPZ files can be supplied with `--data-dir`,
 `--labels-dir`, or `--data-path`; this does not relax fingerprint checks.
 
-To generate diagnostics for every completed EEG seed after the study finishes,
-run this loop from `AGFL` on the target machine:
+To generate diagnostics for every completed run after the study finishes,
+run from `AGFL` on the cluster:
 
 ```bash
-find results/full-eeg/eeg -type f -name result.json -print0 |
-while IFS= read -r -d '' task_result_file; do
-  task_run_dir=${task_result_file%/result.json}
-  python main.py diagnose "$task_run_dir" \
-    --output-dir "analysis/diagnostics/${task_run_dir#results/full-eeg/}" || break
-done
+python main.py diagnose-session results/full-eeg \
+  --device cuda --partition validation --embedding tsne
 ```
 
-Each checkpoint loads its dataset again, so this is more expensive than plotting
-the saved result tables. A single-seed diagnostic is sufficient for an initial
-visual inspection; the loop processes all completed seeds when requested.
+For a tuning search, this processes the selected checkpoints and excludes
+validation-only candidate fits. Each checkpoint loads its dataset again, so
+this is more expensive than plotting the saved result tables. A single-seed
+diagnostic is sufficient for an initial visual inspection.
 
 The diagnostic outputs cover:
 
@@ -123,11 +126,12 @@ To add descriptive sparsity/entropy-versus-accuracy figures after generating
 diagnostics for the desired runs:
 
 ```bash
-python main.py analyze results/full-eeg --output-dir analysis/full-eeg --plots \
-  --diagnostics-root analysis/diagnostics
+python main.py analyze results/full-eeg --plots
 ```
 
-Only matching runs with verified reconstructed predictions are included.
+The session's `report/diagnostics` is discovered automatically; an explicit
+`--diagnostics-root` can point elsewhere. Only matching runs with verified
+reconstructed predictions are included.
 Diagnostic sampling settings and partitions are separated. These scatterplots
 do not establish that sparsity caused an accuracy change; the declared Top-k
 ablation runs remain the controlled experiments.
@@ -142,6 +146,17 @@ progress, keep its source and environment stable until all models/seeds finish,
 or use a separate analysis checkout. Copying new source into a live multi-model
 study changes the source fingerprint used to pair subsequent runs, even when
 the change only adds plotting.
+
+For an existing completed folder, `python main.py organize-results SESSION`
+creates the `report`/`artifacts` separation without training, changing scores
+or rewriting saved configurations. Generate missing diagnostics with the
+training checkout before migrating if model code has since changed. Migration
+and plotting should run after all writers have finished.
+
+A downloaded `report/` alone can supply `analyze /path/to/report --plots`;
+checkpoint diagnostics still require the canonical `artifacts/` and recordings
+on the cluster. The plotting command does not turn validation-only candidate
+records into held-out test results.
 
 On the target machine, `python -m pytest tests/test_visualization.py` checks
 prediction/split alignment, matched pairs, non-training diagnostics, map/output

@@ -85,10 +85,15 @@ def test_cuda_eeg_training_completes_with_strict_determinism(tmp_path, monkeypat
         assert not torch.is_deterministic_algorithms_warn_only_enabled()
         assert results[0]['status'] == 'completed'
         assert results[0]['test']['n_samples'] == 4
-        saved = next((tmp_path / 'results').rglob('result.json'))
+        session = tmp_path / 'results'
+        saved = next((session / 'artifacts').rglob('result.json'))
         history = json.loads(saved.with_name('history.json').read_text())
         assert len(history) == 2
         assert saved.with_name('checkpoint.pt').is_file()
         assert saved.with_name('predictions.npz').is_file()
+        report_run = session / 'report' / 'runs' / saved.parent.relative_to(session / 'artifacts')
+        assert (report_run / 'result.json').read_bytes() == saved.read_bytes()
+        assert (report_run / 'history.json').read_bytes() == saved.with_name('history.json').read_bytes()
+        assert not (report_run / 'checkpoint.pt').exists()
     finally:
         torch.set_num_threads(previous_threads)

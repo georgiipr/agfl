@@ -23,7 +23,7 @@ DEFAULTS = {
     "subject_id": None,
     "schema_version": 2, "model": "eegnet", "attention": "agfl", "dataset": "eeg", "model_variant": "auto",
     "seeds": [0, 1, 2, 3, 4], "deterministic": True, "device": "cuda", "threads": 1,
-    "output_dir": "results", "split_dir": "splits", "data": {}, "model_options": {}, "attention_options": {},
+    "output_dir": "results/session", "split_dir": "splits", "data": {}, "model_options": {}, "attention_options": {},
     "split": {"protocol": "group", "train": 0.6, "validation": 0.2, "test": 0.2},
     "training": TRAINING_DEFAULTS,
 }

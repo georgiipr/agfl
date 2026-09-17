@@ -54,17 +54,28 @@ def normalize_graph(scores, mask, method, stage, renormalize):
     if method == 'softmax':
         if stage in {'scores', 'raw_scores'}:
             return torch.softmax(scores.masked_fill(~mask, float('-inf')), dim=-1)
-        graph = scores.softmax(-1) * mask
-        return graph / graph.sum(-1, keepdim=True).clamp_min(1e-12) if renormalize else graph
+        # Form probabilities before reducing precision: retained small weights
+        # can otherwise underflow before post-softmax renormalization.
+        working = scores.float() if scores.dtype in {torch.float16, torch.bfloat16} else scores
+        graph = working.softmax(-1) * mask
+        if renormalize:
+            graph = graph / graph.sum(-1, keepdim=True).clamp_min(1e-12)
+        return graph.to(scores.dtype)
     if method == 'none':
         return scores * mask
-    graph = F.relu(scores) * mask
+    # In float16, 1e-12 rounds to zero. Keep the activation and normalization
+    # in float32 so an empty row has finite values and a finite ReLU gradient.
+    # Float32/64 formulas and the historical score-stage softmax stay unchanged.
+    working = scores.float() if scores.dtype in {torch.float16, torch.bfloat16} else scores
+    graph = F.relu(working) * mask
     if method == 'row':
-        return graph / graph.sum(-1, keepdim=True).clamp_min(1e-12)
+        graph = graph / graph.sum(-1, keepdim=True).clamp_min(1e-12)
+        return graph.to(scores.dtype)
     if method == 'symmetric':
         graph = (graph + graph.transpose(-1, -2)) / 2
         inv = graph.sum(-1).clamp_min(1e-12).rsqrt()
-        return inv.unsqueeze(-1) * graph * inv.unsqueeze(-2)
+        graph = inv.unsqueeze(-1) * graph * inv.unsqueeze(-2)
+        return graph.to(scores.dtype)
     raise ValueError(f'Unknown graph normalization {method}')
 
 
@@ -95,9 +106,23 @@ class GraphFilter(nn.Module):
     def __init__(self, dim, options):
         super().__init__()
         self.options = options
+        if type(options['learnable_coefficients']) is not bool:
+            raise ValueError('learnable_coefficients must be a boolean')
+        if options['coefficient_init'] == 'zeros':
+            if options['coefficient_activation'] == 'relu':
+                raise ValueError('Zero-initialized ReLU coefficients cannot learn; use a nonzero coefficient_init')
+            if not options['learnable_coefficients'] and options['coefficient_activation'] == 'identity':
+                raise ValueError('Frozen zero coefficients disable graph filtering; use a nonzero coefficient_init')
         taps = options['K'] + 1
         initial = torch.zeros(taps)
-        if options['coefficient_init'] != 'zeros':
+        if options['coefficient_init'] == 'one_hop':
+            if taps < 2 or options['coefficient_activation'] != 'identity':
+                raise ValueError('one_hop initialization requires K >= 1 and identity coefficients')
+            # Start with A @ V. With dense Q/K/V attention, sqrt(dim) score
+            # scaling and value-only taps, this is exactly the MHA formula.
+            # Zero higher-order taps remain learnable under identity activation.
+            initial[1] = 1.
+        elif options['coefficient_init'] != 'zeros':
             initial = torch.ones(taps) if options['coefficient_init'] == 'uniform' else torch.tensor([2.**-k for k in range(taps)])
             initial /= initial.sum()
             if options['coefficient_activation'] == 'softmax':
@@ -142,7 +167,7 @@ class AGFL(nn.Module):
             'graph_normalization': {'softmax', 'row', 'symmetric', 'none'},
             'score_scaling': {'sqrt_dim', 'temperature', 'raw'},
             'coefficient_activation': {'identity', 'relu', 'softmax', 'sigmoid'},
-            'coefficient_init': {'uniform', 'lower_order', 'zeros'},
+            'coefficient_init': {'uniform', 'lower_order', 'zeros', 'one_hop'},
             'projection': {'qkv', 'split_input'},
             'filter_projection': {'none', 'shared', 'separate'},
             'hop_normalization': {'feature', 'frobenius'},

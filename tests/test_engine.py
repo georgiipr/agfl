@@ -23,6 +23,10 @@ def tiny_config(tmp_path, **changes):
     return config
 
 
+def report_run_directory(session, run_dir):
+    return session / 'report' / 'runs' / run_dir.relative_to(session / 'artifacts')
+
+
 def test_focal_probability_is_unweighted():
     weights = torch.tensor([.25, 4.])
     logits = torch.tensor([[2., -1.], [-.5, 1.]], requires_grad=True)
@@ -90,7 +94,12 @@ def test_short_scheduler_does_not_have_negative_period(tmp_path):
 
 def test_saved_configuration_reproduces_selected_checkpoint_and_predictions(tmp_path):
     first = run_experiment(tiny_config(tmp_path))[0]
-    result_path = next((tmp_path / 'results').rglob('result.json'))
+    session = tmp_path / 'results'
+    result_path = next((session / 'artifacts').rglob('result.json'))
+    report_run = report_run_directory(session, result_path.parent)
+    for name in ('result.json', 'config.json', 'split.json', 'history.json', 'predictions.npz'):
+        assert (report_run / name).read_bytes() == result_path.with_name(name).read_bytes()
+    assert not list((session / 'report').rglob('checkpoint.pt'))
     history = json.loads(result_path.with_name('history.json').read_text())
     assert all(0 <= row['train_accuracy'] <= 1 for row in history)
     expected_best = max(history, key=lambda epoch: epoch['validation']['accuracy'])['epoch']
@@ -103,7 +112,7 @@ def test_saved_configuration_reproduces_selected_checkpoint_and_predictions(tmp_
     assert first['test'] == second['test']
     assert first['validation'] == second['validation']
     original = np.load(result_path.with_name('predictions.npz'))
-    repeated = np.load(next((tmp_path / 'replay').rglob('predictions.npz')))
+    repeated = np.load(next((tmp_path / 'replay' / 'artifacts').rglob('predictions.npz')))
     for key in original.files:
         np.testing.assert_array_equal(original[key], repeated[key])
     skipped = run_experiment(replay, skip_completed=True)[0]
@@ -111,7 +120,8 @@ def test_saved_configuration_reproduces_selected_checkpoint_and_predictions(tmp_
     replaced = run_experiment(replay)[0]
     assert replaced['test'] == second['test']
     assert replaced['experiment_id'] == second['experiment_id']
-    assert len(list((tmp_path / 'replay').rglob('result.json'))) == 1
+    assert len(list((tmp_path / 'replay' / 'artifacts').rglob('result.json'))) == 1
+    assert len(list((tmp_path / 'replay' / 'report' / 'runs').rglob('result.json'))) == 1
 
 
 @pytest.mark.parametrize('interruption', [RuntimeError, KeyboardInterrupt])
@@ -132,6 +142,9 @@ def test_interrupted_seed_restarts_without_stale_artifacts(tmp_path, monkeypatch
         run_experiment(config)
     run_dir = directories[0]
     assert json.loads((run_dir / 'failure.json').read_text())['type'] == interruption.__name__
+    report_run = report_run_directory(tmp_path / 'results', run_dir)
+    assert (report_run / 'failure.json').read_bytes() == (run_dir / 'failure.json').read_bytes()
+    assert not (report_run / 'checkpoint.pt').exists()
     saved_split = (run_dir / 'split.json').read_bytes()
     sibling = run_dir.parent / 'seed_99'
     sibling.mkdir()
@@ -142,7 +155,9 @@ def test_interrupted_seed_restarts_without_stale_artifacts(tmp_path, monkeypatch
         assert (destination / 'split.json').read_bytes() == saved_split
         for name in ('checkpoint.pt', 'history.json', 'predictions.npz', 'result.json', 'selection.json', 'failure.json', 'history.json.tmp'):
             assert not (destination / name).exists(), name
+            assert not (report_run / name).exists(), name
         assert (destination / 'config.json').is_file()
+        assert (report_run / 'config.json').read_bytes() == (destination / 'config.json').read_bytes()
         assert (destination / 'notes.txt').read_text() == 'keep my notes'
         return {'status': 'restarted'}
     monkeypatch.setattr(ModelSpec, 'run', restarted_run)
@@ -155,12 +170,17 @@ def test_skip_completed_restarts_an_incomplete_completion_record(tmp_path, monke
 
     config = tiny_config(tmp_path)
     run_experiment(config)
-    result_path = next((tmp_path / 'results').rglob('result.json'))
+    result_path = next((tmp_path / 'results' / 'artifacts').rglob('result.json'))
+    report_run = report_run_directory(tmp_path / 'results', result_path.parent)
     # A completion record alone must not prevent recovery of a damaged run.
+    # Leave the downloadable mirror intact: canonical damage must still restart.
     result_path.with_name('predictions.npz').unlink()
+    assert (report_run / 'predictions.npz').is_file()
     def restarted_run(self, resolved, bundle, split, run_dir):
         assert not (run_dir / 'result.json').exists()
         assert not (run_dir / 'checkpoint.pt').exists()
+        assert not (report_run / 'result.json').exists()
+        assert not (report_run / 'predictions.npz').exists()
         return {'status': 'restarted'}
     monkeypatch.setattr(ModelSpec, 'run', restarted_run)
     assert run_experiment(config, skip_completed=True) == [{'status': 'restarted'}]
@@ -171,16 +191,20 @@ def test_abort_during_replacement_cannot_leave_old_completed_results(tmp_path, m
 
     config = tiny_config(tmp_path)
     run_experiment(config)
-    result_path = next((tmp_path / 'results').rglob('result.json'))
+    result_path = next((tmp_path / 'results' / 'artifacts').rglob('result.json'))
+    report_run = report_run_directory(tmp_path / 'results', result_path.parent)
     def interrupted_run(self, resolved, bundle, split, run_dir):
         assert not (run_dir / 'result.json').exists()
         assert not (run_dir / 'checkpoint.pt').exists()
+        assert not (report_run / 'result.json').exists()
         raise KeyboardInterrupt('replacement interrupted')
     monkeypatch.setattr(ModelSpec, 'run', interrupted_run)
     with pytest.raises(KeyboardInterrupt):
         run_experiment(config)
     assert not result_path.exists()
     assert result_path.with_name('failure.json').is_file()
+    assert not (report_run / 'result.json').exists()
+    assert (report_run / 'failure.json').read_bytes() == result_path.with_name('failure.json').read_bytes()
 
 
 def test_active_seed_cannot_be_overwritten_and_lock_releases_after_abort(tmp_path):

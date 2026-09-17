@@ -8,6 +8,7 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc
 
 from agfl.metrics import classification_metrics
 from agfl.config import experiment_selection
+from agfl.result_paths import diagnostic_manifest_paths
 
 
 def selection_label(run):
@@ -160,7 +161,7 @@ def plot_diagnostic_comparisons(writer, diagnostics_root, runs_by_experiment):
     seen = set()
     available = {(run['experiment_id'], run['seed'], run['split_id'], run['dataset_fingerprint']): run
                  for runs in runs_by_experiment.values() for run in runs}
-    for path in sorted(Path(diagnostics_root).rglob('manifest.json')):
+    for path in diagnostic_manifest_paths(diagnostics_root):
         manifest = json.loads(path.read_text())
         if manifest.get('kind') != 'checkpoint_diagnostics':
             continue

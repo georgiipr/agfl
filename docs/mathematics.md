@@ -38,11 +38,20 @@ bias. Graph/filter/input gradients through this branch are initially zero,
 whereas coefficient gradients can become nonzero. This is an observable
 initialization property, not evidence that the definition is wrong.
 `coefficient_init="uniform"` and `"lower_order"` are explicit alternatives.
+`"one_hop"` initializes `[0, 1, 0, ...]`, requires `K >= 1` and identity
+activation, and makes the dense polynomial QKV/value-only configuration start
+with the MHA computation. See the
+[cross-model settings and checks](agfl_cross_model_improvements.md).
+Zero initialization with ReLU activation is rejected because its coefficients
+cannot learn at zero; frozen identity-zero coefficients are also rejected.
+Zero logits remain valid with sigmoid/softmax, whose effective coefficients
+are nonzero.
 
 ## Reconciliation with the supplied manuscript
 
-Inspected document: `NEU_article_submission.pdf`, Section 2.1, page 3, equations
-1–8. The manuscript and active code differ in several ways:
+Current reference: `Downloads/NEU_art_submission.pdf`, page 3, equations 1–8,
+checked against the [final submission review](neurips_submission_reference.md).
+The manuscript and active code differ in several ways:
 
 | Item | Active code, preserved default | Manuscript |
 |---|---|---|
@@ -98,6 +107,9 @@ Graph normalization alternatives are `softmax`, `row` (nonnegative ReLU weights
 normalized by row degree), `symmetric` (symmetrize nonnegative weights, then
 D^−1/2 A D^−1/2), and `none` (masked raw/scaled scores, including signed values).
 Symmetrization can increase retained support beyond the directed Top-k mask.
+For float16/bfloat16 inputs, row/symmetric normalization and post-softmax
+normalization use float32 intermediates before casting back. This keeps the
+denominator floor representable and avoids overflow of half-precision degrees.
 Unnormalized signed operators can amplify high powers; nonfinite losses or
 unscaled gradients stop a run instead of producing publishable metrics.
 

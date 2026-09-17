@@ -162,6 +162,7 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
     from agfl.datasets.base import normalize_samples
 
     root = tmp_path / 'search'
+    artifacts, published = root / 'artifacts', root / 'report'
     configs = search_configs(tmp_path, root, [1], [0, 1],
                              ['compact_train_channel', 'compact_trialnorm'], epochs=2)
     for experiments in configs.values():
@@ -175,6 +176,9 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
     fits, tests, splits = [], [], {}
     def train(cfg, bundle, split, path, *, validation_only):
         assert validation_only
+        assert path.is_relative_to(artifacts / 'candidates')
+        for name in ('selection_report.json', 'search_result.json', 'search_report.md'):
+            assert not (published / name).exists(), name
         seed, norm = cfg['seeds'][0], cfg['data']['normalization']
         assert split['sample_ids'] == splits.setdefault(seed, split['sample_ids'])
         fits.append((seed, norm))
@@ -185,7 +189,10 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
         return result
     def evaluate(cfg, bundle, split, path, **kwargs):
         # All four candidates must finish and choices must exist before ANY test.
-        assert len(fits) >= 4 and (root / 'selection_report.json').exists()
+        assert len(fits) >= 4 and (artifacts / 'selection_report.json').exists()
+        assert (published / 'selection_report.json').read_bytes() == (artifacts / 'selection_report.json').read_bytes()
+        assert len(list((published / 'runs' / 'candidates').rglob('selection.json'))) == 4
+        assert path.is_relative_to(artifacts / 'selected')
         seed, norm = cfg['seeds'][0], cfg['data']['normalization']
         assert norm == ('train_channel' if seed == 0 else 'per_sample')
         tests.append((seed, norm))
@@ -203,16 +210,26 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
     assert report['choices'] == {'A01': {'0': 'compact_train_channel', '1': 'compact_trialnorm'}}
     assert report['mean_test_accuracy'] == .5 and not report['target_met']
     assert len(fits) == 4 and len(tests) == 2
-    assert not list((root / 'candidates').rglob('result.json'))
-    assert len(list((root / 'selected').rglob('result.json'))) == 2
+    assert not list((artifacts / 'candidates').rglob('result.json'))
+    assert not list((published / 'runs' / 'candidates').rglob('result.json'))
+    assert len(list((artifacts / 'selected').rglob('result.json'))) == 2
+    assert len(list((published / 'runs' / 'selected').rglob('result.json'))) == 2
+    assert not list(published.rglob('checkpoint.pt'))
+    for name in ('search_plan.json', 'selection_report.json', 'search_result.json', 'search_report.md'):
+        assert (published / name).read_bytes() == (artifacts / name).read_bytes()
     assert run_search(configs) == report
     assert len(fits) == 4 and len(tests) == 2
     # An aborted candidate is restarted in place, preserving unrelated files.
-    candidate = root / 'candidates' / 'compact_trialnorm' / 'A01' / 'seed_1'
+    candidate = artifacts / 'candidates' / 'compact_trialnorm' / 'A01' / 'seed_1'
     write_json(candidate / 'failure.json', {'type': 'KeyboardInterrupt'})
+    from agfl.session import mirror_run
+    candidate_report = mirror_run(root, candidate)
+    assert (candidate_report / 'failure.json').is_file()
     (candidate / 'notes.txt').write_text('keep')
     run_search(configs)
     assert len(fits) == 5 and not (candidate / 'failure.json').exists()
+    assert not (candidate_report / 'failure.json').exists()
+    assert len(list((published / 'runs' / 'selected').rglob('result.json'))) == 2
     assert len(tests) == 3  # Replaced candidates invalidate the old selected run.
     assert (candidate / 'notes.txt').read_text() == 'keep'
     changed = deepcopy(configs)

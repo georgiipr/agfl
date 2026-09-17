@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from agfl.storage import write_json
+from agfl.result_paths import resolve_artifact_run
 from .common import FigureWriter, slug
 from .maps import mixer_map, map_statistics
 
@@ -246,6 +247,9 @@ def filter_figures(writer, model):
 
 def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', max_samples=256,
                  embedding='tsne', data_dir=None, labels_dir=None, data_path=None):
+    # Resolve report copies before importing model/data dependencies, so a
+    # report-only download receives an actionable missing-checkpoint message.
+    directory = resolve_artifact_run(run_dir)
     import torch
     from agfl.datasets import load_dataset, validate_split
     from agfl.datasets.base import source_fingerprint
@@ -253,7 +257,6 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
     from agfl.models import get_model_spec
     from agfl.reproducibility import seed_everything, provenance
 
-    directory = Path(run_dir).resolve()
     config = json.loads((directory / 'config.json').read_text())
     split = json.loads((directory / 'split.json').read_text())
     if partition not in {'validation', 'test'} or embedding not in {'pca', 'tsne', 'umap'}:

@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import shutil
 import statistics
+import traceback
 
 from agfl.config import digest, merge, resolve_experiments
 from agfl.presets import load_preset
@@ -36,6 +37,33 @@ DEFAULT_CANDIDATES = tuple(CANDIDATES)
 CANDIDATES['spatial_recombine'] = merge(
     CANDIDATES['spatial_control'],
     {'training': {'augmentation': {'recombine_segments': 8, 'recombine_probability': .5}}},
+)
+# A06 seed 0 has 133 training trials: 48/48/37 instead of 64/64/5,
+# retaining every trial and the same three optimizer steps per epoch.
+CANDIDATES['spatial_batch48'] = merge(
+    CANDIDATES['spatial_control'],
+    {'training': {'batch_size': 48}},
+)
+# Improve AGFL's graph/filter parameterization while keeping EEGNet, data and
+# training fixed. The dense variant starts with the standard MHA computation;
+# the other two isolate pruning, then norm-preserving propagation.
+CANDIDATES['spatial_qkv_dense'] = merge(
+    CANDIDATES['spatial_control'],
+    {'attention_options': {
+        'projection': 'qkv', 'qkv_bias': True, 'filter_projection': 'none',
+        'score_scaling': 'sqrt_dim', 'coefficient_init': 'one_hop',
+        'coefficient_activation': 'identity', 'agfl_variant': 'polynomial',
+        'learnable_coefficients': True, 'K': 2, 'top_k': None,
+        'graph_normalization': 'softmax',
+    }},
+)
+CANDIDATES['spatial_qkv_sparse'] = merge(
+    CANDIDATES['spatial_qkv_dense'],
+    {'attention_options': {'top_k': 'scheduled'}},
+)
+CANDIDATES['spatial_qkv_renorm'] = merge(
+    CANDIDATES['spatial_qkv_sparse'],
+    {'attention_options': {'agfl_variant': 'renormalized', 'hop_normalization': 'feature'}},
 )
 
 
@@ -107,24 +135,29 @@ def run_search(configs, *, restart=False):
     from agfl.engine import run_training, evaluate_saved_checkpoint, completed_run
     from agfl.reproducibility import provenance, seed_everything
     from agfl.storage import reset_run_artifacts, run_directory, write_json
+    from agfl.session import (session_paths, session_activity, mirror_run,
+                              publish_session_metadata)
 
     first = next(iter(configs.values()))[0]
     root = Path(first['output_dir'])
+    session = session_paths(root, create=True)
+    artifacts = session.artifacts
     current_provenance = provenance()
     # Serialize the whole search: a second launcher must not replace a chosen
     # candidate while this process is preparing its final test evaluation.
-    with run_directory(root):
+    with session_activity(root), run_directory(artifacts):
         # Fixed run locations are safe to resume only within the same search.
         # In particular, a smaller subject list must not retain old subjects in
         # selected/ and silently contaminate the new analysis.
         plan = {'candidate_order': list(configs), 'configurations': configs}
-        plan_path = root / 'search_plan.json'
+        plan_path = artifacts / 'search_plan.json'
         if plan_path.exists() and json.loads(plan_path.read_text()) != plan:
             raise ValueError('This output directory belongs to different search settings. Use a new --output-dir; identical launches resume automatically.')
         write_json(plan_path, plan)
         # Do not leave an earlier completion summary visible during a restart.
         for name in ('selection_report.json', 'search_result.json', 'search_report.md'):
-            (root / name).unlink(missing_ok=True)
+            (artifacts / name).unlink(missing_ok=True)
+        publish_session_metadata(root)
         grouped = defaultdict(dict)
         for name, experiments in configs.items():
             for config in experiments:
@@ -151,28 +184,35 @@ def run_search(configs, *, restart=False):
                     resolved.update(seeds=[seed], dataset_fingerprint=bundle.fingerprint,
                                     expected_split_id=split['split_id'], resolved_metadata=bundle.metadata,
                                     provenance=current_provenance)
-                    path = root / 'candidates' / name / subject / f'seed_{seed}'
+                    path = artifacts / 'candidates' / name / subject / f'seed_{seed}'
                     with run_directory(path):
                         previous = None if restart else completed_selection(path, resolved, split)
                         if previous is None:
                             # Replacing ANY candidate can change this split's
                             # winner. Hide its prior selected result immediately,
                             # so an abort cannot leave it looking up-to-date.
-                            target = root / 'selected' / 'eeg' / f'subject_{subject}' / f'seed_{seed}'
+                            target = artifacts / 'selected' / 'eeg' / f'subject_{subject}' / f'seed_{seed}'
                             if target.exists():
                                 with run_directory(target):
                                     reset_run_artifacts(target)
+                                    mirror_run(root, target)
                             reset_run_artifacts(path)
                             write_json(path / 'config.json', resolved)
                             write_json(path / 'split.json', split)
+                            mirror_run(root, path)
                             print(f'Validation search: {subject} {name} seed={seed}', flush=True)
                             try:
                                 previous = run_training(resolved, bundle, split, path, validation_only=True)
                                 previous['checkpoint_sha256'] = checkpoint_hash(path / 'checkpoint.pt')
                                 write_json(path / 'selection.json', previous)
                             except BaseException as error:
-                                write_json(path / 'failure.json', {'type': type(error).__name__, 'message': str(error)})
+                                write_json(path / 'failure.json', {'type': type(error).__name__, 'message': str(error),
+                                                                   'traceback': traceback.format_exc()})
                                 raise
+                            finally:
+                                mirror_run(root, path)
+                        else:
+                            mirror_run(root, path)
                         runs[name].append(previous)
                         prepared[name].append((resolved, split, path))
             choices[subject], selected[subject] = {}, []
@@ -183,11 +223,12 @@ def run_search(configs, *, restart=False):
             # Release subjects' recording arrays before moving on. Final testing
             # starts only after every requested subject's choice is recorded.
             del bundles
-        write_json(root / 'selection_report.json', {
+        write_json(artifacts / 'selection_report.json', {
             'status': 'settings_selected', 'choices': choices,
             'selection_metric': 'validation accuracy within each subject/seed split; macro F1 breaks ties',
             'provenance': current_provenance,
             'note': 'No test metrics entered candidate or checkpoint selection.'})
+        publish_session_metadata(root)
         for subject, selections in sorted(selected.items()):
             bundles = {}
             for winner, config, split, source in selections:
@@ -195,17 +236,19 @@ def run_search(configs, *, restart=False):
                 if data_key not in bundles:
                     bundles[data_key] = load_dataset('eeg', config['data'])
                 bundle = bundles[data_key]
-                target = root / 'selected' / 'eeg' / f'subject_{subject}' / f"seed_{config['seeds'][0]}"
+                target = artifacts / 'selected' / 'eeg' / f'subject_{subject}' / f"seed_{config['seeds'][0]}"
                 with run_directory(target):
                     previous = None if restart else completed_run(target, config)
                     source_hash = checkpoint_hash(source / 'checkpoint.pt')
                     if (previous is not None and previous.get('search_checkpoint_sha256') == source_hash
                             and checkpoint_hash(target / 'checkpoint.pt') == source_hash):
                         all_results.append(previous)
+                        mirror_run(root, target)
                         continue
                     reset_run_artifacts(target)
                     for name in ('config.json', 'split.json', 'history.json', 'checkpoint.pt'):
                         shutil.copyfile(source / name, target / name)
+                    mirror_run(root, target)
                     selection = json.loads((source / 'selection.json').read_text())
                     try:
                         result = evaluate_saved_checkpoint(config, bundle, split, target,
@@ -214,8 +257,11 @@ def run_search(configs, *, restart=False):
                         write_json(target / 'result.json', result)
                         all_results.append(result)
                     except BaseException as error:
-                        write_json(target / 'failure.json', {'type': type(error).__name__, 'message': str(error)})
+                        write_json(target / 'failure.json', {'type': type(error).__name__, 'message': str(error),
+                                                             'traceback': traceback.format_exc()})
                         raise
+                    finally:
+                        mirror_run(root, target)
         subject_scores = {subject: [r['test']['accuracy'] for r in all_results if r['subject_id'] == subject]
                           for subject in sorted(selected)}
         subject_means = {subject: statistics.mean(scores) for subject, scores in subject_scores.items()}
@@ -231,7 +277,7 @@ def run_search(configs, *, restart=False):
             'choices': {s: {seed: choice['winner'] for seed, choice in by_seed.items()} for s, by_seed in choices.items()},
             'caveat': '75% means the mean across all nine subjects, not every subject. This measures a validation-selected tuning procedure, not one fixed hyperparameter setting. Seeds use overlapping random T-session trial splits and are not independent test cohorts. Previously inspected test scores are not a pristine new confirmation set.',
         }
-        write_json(root / 'search_result.json', report)
+        write_json(artifacts / 'search_result.json', report)
         lines = ['# EEGNet + AGFL / BCI IV 2a', '',
                  f"Mean selected test accuracy: **{report['mean_test_accuracy']:.2%}** across {len(subject_means)}/9 subjects ({len(all_results)} runs).",
                  '', 'Settings were selected independently on validation within each subject/seed split.',
@@ -245,7 +291,9 @@ def run_search(configs, *, restart=False):
         for result in all_results:
             lines.append(f"| {result['subject_id']} | {result['seed']} | {result['search_candidate']} | {result['validation']['accuracy']:.2%} | {result['test']['accuracy']:.2%} | {result['best_checkpoint_epoch']} |")
         lines += ['', 'Candidate validation scores: `selection_report.json`. Overall selected metrics: `search_result.json`.',
-                  'Run `analyze` on `selected/` to generate result figures. See the README for checkpoint diagnostic plots.', '']
-        (root / 'search_report.md').write_text('\n'.join(lines))
+                  'Run `analyze` on the session folder to generate result figures under `report/analysis/`.',
+                  'Download `report/` for review; keep `artifacts/` on the cluster for checkpoint diagnostics.', '']
+        (artifacts / 'search_report.md').write_text('\n'.join(lines))
+        publish_session_metadata(root)
         print(f"Selected EEGNet + AGFL: {report['mean_test_accuracy']:.2%} test accuracy across {len(subject_means)}/9 subjects", flush=True)
         return report

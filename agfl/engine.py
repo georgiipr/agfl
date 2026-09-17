@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import time
+import traceback
 import numpy as np
 import torch
 from torch import nn
@@ -115,6 +116,18 @@ def make_optimizer(model, options):
     return factories[options['optimizer']](model.parameters(), **kwargs)
 
 
+def gradients_are_finite(parameters):
+    """Check a single-device model, transferring only one final flag to Python.
+
+    Converting each parameter's flag to bool separately synchronizes CUDA once
+    per gradient tensor. Reduce the flags on the model's device first instead.
+    Parameters without gradients (including frozen parameters) are ignored.
+    """
+    flags = [torch.isfinite(parameter.grad).all()
+             for parameter in parameters if parameter.grad is not None]
+    return not flags or bool(torch.stack(flags).all())
+
+
 def make_scheduler(optimizer, options):
     if options['scheduler'] == 'none':
         return None
@@ -155,7 +168,9 @@ def evaluate(model, loader, device, loss_fn=None):
 
 def run_training(config, bundle, split, run_dir, *, validation_only=False):
     from .models import get_model_spec
+    from .session import find_session, mirror_run
     run_dir = Path(run_dir)
+    session = find_session(run_dir)
     seed = config['seeds'][0]
     if config.get('subject_id') is not None and set(bundle.groups) != {config['subject_id']}:
         raise ValueError('An individual-subject experiment cannot contain another subject')
@@ -202,7 +217,7 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
                 scaler.unscale_(optimizer)
                 if options['gradient_clip'] is not None:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), options['gradient_clip'], error_if_nonfinite=not options['amp'])
-                elif not options['amp'] and any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
+                elif not options['amp'] and not gradients_are_finite(model.parameters()):
                     raise FloatingPointError('Nonfinite gradient')
                 previous_scale = scaler.get_scale()
                 scaler.step(optimizer)
@@ -230,6 +245,8 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
             if scheduler is not None:
                 scheduler.step(validation['loss']) if options['scheduler'] == 'plateau' else scheduler.step()
             write_json(run_dir / 'history.json', history)
+            if session is not None:
+                mirror_run(session.root, run_dir, names=('history.json',))
             progress.set_postfix(loss=f'{loss_total / n:.4f}', train_acc=f'{correct / n:.1%}',
                                  val_acc=f"{validation['accuracy']:.1%}", refresh=False)
             patience = options.get('early_stopping_patience', 0)
@@ -346,8 +363,16 @@ def run_experiment(config, skip_completed=False):
 
 def _run_experiment(config, skip_completed=False):
     from .config import resolve_config
-    from .models import get_model_spec
+    from .session import session_paths, session_activity
     config = resolve_config(config)
+    session = session_paths(config['output_dir'], create=True)
+    with session_activity(session.root):
+        return _run_session_experiment(config, session, skip_completed)
+
+
+def _run_session_experiment(config, session, skip_completed):
+    from .models import get_model_spec
+    from .session import mirror_run
     spec = get_model_spec(config['model'])
     seed_everything(config['seeds'][0], config['deterministic'], config['threads'])
     current_provenance = provenance()
@@ -371,13 +396,14 @@ def _run_experiment(config, skip_completed=False):
         resolved.update(seeds=[seed], dataset_fingerprint=bundle.fingerprint,
                         expected_split_id=split['split_id'], resolved_metadata=bundle.metadata,
                         provenance=current_provenance)
-        output = Path(config['output_dir']) / config['dataset']
+        output = session.artifacts / config['dataset']
         if config.get('subject_id'):
             output = output / f"subject_{config['subject_id']}"
         run_dir = output / f"{config['model']}-{config['attention']}-{experiment_identity(resolved)}" / f'seed_{seed}'
         with run_directory(run_dir):
             previous = completed_run(run_dir, resolved) if skip_completed else None
             if previous is not None:
+                mirror_run(session.root, run_dir)
                 results.append(previous)
                 continue
             if (run_dir / 'config.json').exists():
@@ -385,9 +411,13 @@ def _run_experiment(config, skip_completed=False):
             reset_run_artifacts(run_dir)
             write_json(run_dir / 'config.json', resolved)
             write_json(run_dir / 'split.json', split)
+            mirror_run(session.root, run_dir)
             try:
                 results.append(spec.run(resolved, bundle, split, run_dir))
             except (Exception, KeyboardInterrupt) as error:
-                write_json(run_dir / 'failure.json', {'type': type(error).__name__, 'message': str(error)})
+                write_json(run_dir / 'failure.json', {'type': type(error).__name__, 'message': str(error),
+                                                       'traceback': traceback.format_exc()})
                 raise
+            finally:
+                mirror_run(session.root, run_dir)
     return results
