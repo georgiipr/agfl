@@ -16,6 +16,36 @@ METRICS = ('accuracy', 'roc_auc', 'f1')
 PRIMARY = {'mha', 'performer', 'linformer', 'nystromformer'}
 
 
+def attention_display_name(key, options=None):
+    """Readable variant labels; raw method keys and saved identities stay intact."""
+    options = options or {}
+    if key == 'agfl':
+        if options.get('coefficient_conditioning', 'static') == 'token_contrast':
+            scale = options.get('coefficient_conditioning_scale', .5)
+            return f'AGFL (token routing, scale {scale:g})'
+        if options.get('coefficient_conditioning', 'static') == 'trial_power':
+            scale = options.get('coefficient_conditioning_scale', .5)
+            return f'AGFL (trial-conditioned, scale {scale:g})'
+        return 'AGFL (static)'
+    if key == 'linformer' and 'projection_rank' in options:
+        return f"Linformer (rank {options['projection_rank']})"
+    if key == 'nystromformer' and 'landmarks' in options:
+        return f"Nyströmformer ({options['landmarks']} landmarks)"
+    return {'mha': 'MHA', 'performer': 'Performer',
+            'linformer': 'Linformer', 'nystromformer': 'Nyströmformer'}.get(key, key)
+
+
+def conditioning_control(candidate, control):
+    """Pair a conditioned AGFL with its otherwise identical static attention."""
+    left, right = candidate.get('attention_options', {}), control.get('attention_options', {})
+    if (left.get('coefficient_conditioning', 'static') not in {'trial_power', 'token_contrast'}
+            or right.get('coefficient_conditioning', 'static') != 'static'):
+        return False
+    ignored = {'coefficient_conditioning', 'coefficient_conditioning_scale'}
+    return ({k: v for k, v in left.items() if k not in ignored}
+            == {k: v for k, v in right.items() if k not in ignored})
+
+
 def paired_statistics(a, b):
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     if a.shape != b.shape or a.ndim != 1 or not np.isfinite(a).all() or not np.isfinite(b).all():
@@ -70,6 +100,46 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def class_statistics(runs):
+    """Keep individual class errors visible; average rates over seeds, not trials."""
+    rows, groups = [], defaultdict(list)
+    for run in runs:
+        names = run['config'].get('resolved_metadata', {}).get('label_names', [])
+        for partition in ('validation', 'test'):
+            entries = run[partition].get('per_class', [])
+            # Older reports have no per-class records. Do not invent them or
+            # silently count missing classes as perfect/zero performance.
+            for index, entry in enumerate(entries):
+                if entry['class_id'] != index:
+                    raise ValueError('Per-class metric IDs must be ordered and contiguous')
+                row = {key: run[key] for key in ('experiment_id', 'comparison_id', 'dataset', 'seed', 'split_id')}
+                row.update(model=run['backbone_key'], attention=run['attention_key'],
+                           attention_label=attention_display_name(run['attention_key'], run['config'].get('attention_options', {})),
+                           subject_id=run['config'].get('subject_id'), partition=partition,
+                           class_name=names[index] if len(names) == len(entries) else f'Class {index}', **entry)
+                for metric in ('recall', 'precision', 'f1'):
+                    value = row[metric]
+                    if value is not None and (not math.isfinite(value) or not 0 <= value <= 1):
+                        raise ValueError('Per-class rates must be finite in [0, 1] or null')
+                rows.append(row)
+                groups[(run['experiment_id'], partition, index)].append(row)
+    summaries = []
+    for _, records in sorted(groups.items()):
+        if len({row['class_name'] for row in records}) != 1:
+            raise ValueError('Class names differ across seeds')
+        row = {key: records[0][key] for key in (
+            'experiment_id', 'comparison_id', 'dataset', 'model', 'attention',
+            'attention_label', 'subject_id', 'partition', 'class_id', 'class_name')}
+        row.update(n_seeds=len(records), support_occurrences=sum(r['support'] for r in records))
+        for metric in ('recall', 'precision', 'f1'):
+            values = [r[metric] for r in records if r[metric] is not None]
+            row.update({metric + '_mean': float(np.mean(values)) if values else None,
+                        metric + '_std': float(np.std(values, ddof=1)) if len(values) > 1 else None,
+                        metric + '_n': len(values)})
+        summaries.append(row)
+    return rows, summaries
+
+
 def subject_aggregates(runs):
     """Equal-weight subject means; never treat subject x seed as independent people."""
     cohorts = defaultdict(list)
@@ -102,7 +172,9 @@ def subject_aggregates(runs):
             complete = same_seeds and len(means) == len(subjects)
             output.append({
                 'cohort_id': cohort, 'dataset': records[0]['dataset'], 'model': records[0]['backbone_key'],
-                'attention': records[0]['attention_key'], 'partition': partition, 'metric': metric,
+                'attention': records[0]['attention_key'],
+                'attention_label': attention_display_name(records[0]['attention_key'], records[0]['config'].get('attention_options', {})),
+                'partition': partition, 'metric': metric,
                 'subjects': subjects, 'n_subjects': len(subjects), 'seeds_by_subject': seed_sets,
                 'complete_seed_coverage': same_seeds,
                 'mean_of_subject_means': float(np.mean(means)) if complete else None,
@@ -163,6 +235,8 @@ def analyze_results(input_root, output_dir):
         summary.update(n_seeds=len(records), seeds=sorted(r['seed'] for r in records),
                        model_options=first['config']['model_options'],
                        attention_options=first['config'].get('attention_options', {}), metrics={})
+        summary['attention_label'] = attention_display_name(
+            first['attention_key'], first['config'].get('attention_options', first['config']['model_options']))
         row = {k: v for k, v in summary.items() if k not in {'metrics', 'model_options', 'attention_options', 'seeds'}}
         row['seeds'] = json.dumps(summary['seeds'])
         row['model_options'] = json.dumps(summary['model_options'], sort_keys=True)
@@ -184,7 +258,10 @@ def analyze_results(input_root, output_dir):
             continue
         for baseline_id, baseline_runs in groups.items():
             first = baseline_runs[0]
-            if (first['attention_key'] not in PRIMARY or first['backbone_key'] != agfl_runs[0]['backbone_key']
+            is_control = (first['attention_key'] == 'agfl'
+                          and conditioning_control(agfl_runs[0]['config'], first['config']))
+            if (not (first['attention_key'] in PRIMARY or is_control)
+                    or first['backbone_key'] != agfl_runs[0]['backbone_key']
                     or first['comparison_id'] != agfl_runs[0]['comparison_id']):
                 continue
             def pair_key(r):
@@ -200,6 +277,9 @@ def analyze_results(input_root, output_dir):
                             subject_id=first['config'].get('subject_id'),
                             agfl_experiment_id=agfl_id, baseline_experiment_id=baseline_id,
                             baseline=first['attention_key'], metric=metric, comparison_id=first['comparison_id'],
+                            comparison_kind='coefficient_conditioning' if is_control else 'attention',
+                            agfl_label=attention_display_name('agfl', agfl_runs[0]['config'].get('attention_options', {})),
+                            baseline_label=attention_display_name(first['attention_key'], first['config'].get('attention_options', {})),
                             n_unmatched_agfl=len(a_map.keys() - b_map.keys()),
                             n_unmatched_baseline=len(b_map.keys() - a_map.keys()),
                             n_undefined=len(common)-len(pairs))
@@ -212,11 +292,13 @@ def analyze_results(input_root, output_dir):
     output.mkdir(parents=True, exist_ok=True)
     paired_ids = {row[key] for row in comparisons for key in ('agfl_experiment_id', 'baseline_experiment_id')}
     across_subjects = subject_aggregates(runs)
+    class_rows, class_summaries = class_statistics(runs)
     result = {'schema_version': 2, 'n_runs': len(runs), 'experiments': summaries, 'comparisons': comparisons,
               'across_subjects': across_subjects,
+              'per_class': class_summaries,
               'experiments_without_comparable_counterpart': sorted(set(groups) - paired_ids),
               'sources': [r['source'] for r in runs],
-              'methodology': 'Sample SD (ddof=1); paired AGFL minus baseline; two-sided tests; Wilcoxon differences rounded to 12 decimals; Holm family includes all supplied comparisons and metrics separately per test. Repeated overlapping splits are dependent, so seed-level inference is exploratory.'}
+              'methodology': 'Sample SD (ddof=1); paired AGFL minus attention baseline, plus conditioned minus otherwise identical static AGFL when present; two-sided tests; Wilcoxon differences rounded to 12 decimals; Holm family includes all supplied comparisons and metrics separately per test. Repeated overlapping splits are dependent, so seed-level inference is exploratory.'}
     write_json(output / 'aggregation.json', result)
     write_csv(output / 'per_model.csv', flat)
     write_csv(output / 'per_subject.csv', [r for r in flat if r.get('subject_id')])
@@ -225,6 +307,8 @@ def analyze_results(input_root, output_dir):
     write_csv(output / 'attention_comparison.csv', [r for r in flat if r['attention'] in PRIMARY | {'agfl'}])
     write_csv(output / 'agfl_ablations.csv', [r for r in flat if r['attention'] == 'agfl'])
     write_csv(output / 'statistical_comparisons.csv', comparisons)
+    write_csv(output / 'per_class.csv', class_rows)
+    write_csv(output / 'per_class_summary.csv', class_summaries)
     lines = ['# Saved experiment analysis', '', result['methodology'], '',
              '| Dataset | Subject | Model | Attention | Seeds | Parameters | Accuracy | ROC-AUC | Macro F1 |',
              '|---|---|---|---|---:|---:|---:|---:|---:|']
@@ -233,7 +317,7 @@ def analyze_results(input_root, output_dir):
         for metric in METRICS:
             value = row['metrics'][f'test_{metric}']
             formatted.append('undefined' if value['mean'] is None else f"{value['mean']:.4f} ± " + (f"{value['std']:.4f}" if value['std'] is not None else 'undefined'))
-        lines.append(f"| {row['dataset']} | {row.get('subject_id') or 'cohort'} | {row['model']} ({row['experiment_id'][:8]}) | {row['attention']} | {row['n_seeds']} | {row['parameter_count']} | " + ' | '.join(formatted) + ' |')
+        lines.append(f"| {row['dataset']} | {row.get('subject_id') or 'cohort'} | {row['model']} ({row['experiment_id'][:8]}) | {row['attention_label']} | {row['n_seeds']} | {row['parameter_count']} | " + ' | '.join(formatted) + ' |')
     if across_subjects:
         lines += ['', '## Equal-weight subject summaries', '',
                   'Average seeds within each subject first. SD below is between subject means, not across all subject/seed runs.', '',
@@ -243,9 +327,20 @@ def analyze_results(input_root, output_dir):
             if row['partition'] != 'test':
                 continue
             mean, sd = row['mean_of_subject_means'], row['between_subject_sd']
-            lines.append(f"| {row['model']} | {row['attention']} | {', '.join(row['subjects'])} | {row['metric']} | "
+            lines.append(f"| {row['model']} | {row['attention_label']} ({row['cohort_id'][:8]}) | {', '.join(row['subjects'])} | {row['metric']} | "
                          + ('unavailable' if mean is None else f'{mean:.4f}') + ' | '
                          + ('unavailable' if sd is None else f'{sd:.4f}') + ' |')
+    if class_summaries:
+        lines += ['', '## Per-class test recall', '',
+                  'Equal-weight mean and sample SD over seeds. Supports count repeated trial occurrences, not independent subjects. Validation and individual-seed rates are in per_class.csv and per_class_summary.csv.', '',
+                  '| Model | Subject | Attention | Class | Seeds with recall | Recall mean ± SD |',
+                  '|---|---|---|---|---:|---:|']
+        for row in class_summaries:
+            if row['partition'] != 'test':
+                continue
+            mean, sd = row['recall_mean'], row['recall_std']
+            value = ('undefined' if mean is None else f'{mean:.4f}') + ' ± ' + ('undefined' if sd is None else f'{sd:.4f}')
+            lines.append(f"| {row['model']} ({row['experiment_id'][:8]}) | {row.get('subject_id') or 'cohort'} | {row['attention_label']} | {row['class_name']} | {row['recall_n']} | {value} |")
     lines += ['', 'Full configurations and pairing diagnostics are in aggregation.json; raw and Holm-adjusted p-values and effect sizes are in statistical_comparisons.csv.',
               'Synthetic fixtures and short smoke runs are validation artifacts, not estimates of scientific performance.']
     (output / 'report.md').write_text('\n'.join(lines) + '\n')

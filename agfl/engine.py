@@ -4,6 +4,7 @@ import copy
 import json
 import math
 from pathlib import Path
+import random
 import time
 import traceback
 import numpy as np
@@ -79,6 +80,22 @@ class Partition(Dataset):
         return torch.from_numpy(np.asarray(x, dtype=np.float32)), torch.tensor(self.bundle.y[i], dtype=torch.long)
 
 
+class CalibrationInputs(Dataset):
+    """Unaugmented training inputs only; labels are never accessed."""
+    def __init__(self, bundle, indices, normalization):
+        self.bundle, self.indices = bundle, list(indices)
+        self.normalization = normalization
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        x = self.bundle.x[self.indices[index]].copy()
+        if self.normalization is not None:
+            x = (x - self.normalization['mean']) / self.normalization['std']
+        return torch.from_numpy(np.asarray(x, dtype=np.float32))
+
+
 def make_loaders(bundle, split, config, seed, *, include_test=True):
     from .datasets import validate_split
     validate_split(bundle, split)
@@ -105,7 +122,99 @@ def make_loaders(bundle, split, config, seed, *, include_test=True):
             num_workers=options['num_workers'], worker_init_fn=seed_worker,
             generator=torch.Generator().manual_seed(seed + offset),
             pin_memory=config['device'].startswith('cuda'), drop_last=False)
+    if options.get('ema_decay', 0) > 0:
+        loaders['calibration'] = DataLoader(
+            CalibrationInputs(bundle, split['train'], normalization),
+            batch_size=options['batch_size'], shuffle=False, num_workers=0,
+            generator=torch.Generator().manual_seed(seed + 3),
+            pin_memory=config['device'].startswith('cuda'), drop_last=False)
     return loaders, normalization
+
+
+class ExponentialMovingAverage:
+    """Average post-update parameters; buffers retain their defined semantics."""
+    def __init__(self, model, decay):
+        if type(decay) not in (int, float) or not math.isfinite(decay) or not 0 < decay < 1:
+            raise ValueError('EMA decay must be finite in (0, 1)')
+        # Deepcopy does not reinitialize layers or consume their random draws.
+        self.model = copy.deepcopy(model).eval().requires_grad_(False)
+        self.decay, self.updates = float(decay), 0
+
+    @torch.no_grad()
+    def update(self, model):
+        for averaged, current in zip(self.model.parameters(), model.parameters(), strict=True):
+            averaged.lerp_(current.detach(), 1 - self.decay)
+        # Running variances and integer counters are not parameter averages.
+        # BN buffers are subsequently recalibrated; other buffers (positions,
+        # fixed random features, etc.) must preserve their source meaning.
+        for averaged, current in zip(self.model.buffers(), model.buffers(), strict=True):
+            averaged.copy_(current)
+        self.updates += 1
+
+
+@torch.no_grad()
+def calibrate_batch_norm(model, loader, device):
+    """Recompute BN statistics from every unaugmented training input.
+
+    Statistics are sample-weighted averages of batch statistics, including the
+    partial last batch, not a claim of exact pooled population variance. The
+    forward pass keeps dropout disabled. Training state and RNG are restored.
+    """
+    layers = [layer for layer in model.modules()
+              if isinstance(layer, nn.modules.batchnorm._BatchNorm) and layer.track_running_stats]
+    metadata = {'partition': 'train', 'samples': 0, 'batches': 0,
+                'batch_norm_layers': len(layers), 'method': 'sample_weighted_batch_statistics',
+                'augmentation': False, 'dropout': False}
+    if not layers:
+        return metadata
+    modes = {layer: layer.training for layer in model.modules()}
+    momenta = {layer: layer.momentum for layer in layers}
+    python_state, numpy_state = random.getstate(), np.random.get_state()
+    cuda_devices = ([device.index if device.index is not None else torch.cuda.current_device()]
+                    if device.type == 'cuda' else [])
+    try:
+        with torch.random.fork_rng(devices=cuda_devices):
+            model.eval()
+            for layer in layers:
+                layer.reset_running_stats()
+                layer.train()
+            for x in loader:
+                count = len(x)
+                for layer in layers:
+                    layer.momentum = count / (metadata['samples'] + count)
+                model(x.to(device))
+                metadata['samples'] += count
+                metadata['batches'] += 1
+            if metadata['samples'] != len(loader.dataset) or not metadata['samples']:
+                raise ValueError('BatchNorm calibration must include every training sample')
+    finally:
+        for layer, momentum in momenta.items():
+            layer.momentum = momentum
+        for layer, mode in modes.items():
+            layer.training = mode
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+    return metadata
+
+
+def checkpoint_is_better(metrics, best_metrics, criterion, tiebreaker='none'):
+    """Compare held-out validation metrics without consulting test data."""
+    if tiebreaker not in {'none', 'f1_loss'}:
+        raise ValueError('Unknown checkpoint tiebreaker')
+    if tiebreaker == 'f1_loss' and criterion != 'accuracy':
+        raise ValueError('f1_loss tiebreaker requires accuracy selection')
+
+    def key(values):
+        names = [criterion] + (['f1', 'loss'] if tiebreaker == 'f1_loss' else [])
+        for name in names:
+            value = values.get(name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f'Checkpoint metric {name} is undefined on validation data')
+        score = -values[criterion] if criterion == 'loss' else values[criterion]
+        return ((score, values['f1'], -values['loss']) if tiebreaker == 'f1_loss' else (score,))
+
+    current_key = key(metrics)
+    return best_metrics is None or current_key > key(best_metrics)
 
 
 def make_optimizer(model, options):
@@ -194,8 +303,10 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
     optimizer = make_optimizer(model, options)
     scheduler = make_scheduler(optimizer, options)
     scaler = torch.amp.GradScaler('cuda', enabled=options['amp'])
-    history, best_value, best_epoch = [], None, None
+    ema = ExponentialMovingAverage(model, options['ema_decay']) if options.get('ema_decay', 0) else None
+    history, best_metrics, best_epoch, best_policy = [], None, None, None
     criterion = options['checkpoint_criterion']
+    tiebreaker = options.get('checkpoint_tiebreaker', 'none')
     started = time.monotonic()
     description = f"{config['dataset']}/{config['model']}/{config['attention']} {config.get('subject_id') or 'cohort'} seed={seed}"
     with tqdm(range(1, options['epochs'] + 1), desc=description, unit='epoch',
@@ -222,26 +333,36 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
                 previous_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
-                skipped_steps += int(scaler.get_scale() < previous_scale)
+                skipped_step = scaler.get_scale() < previous_scale
+                skipped_steps += int(skipped_step)
                 if hasattr(model, 'clip_weights'):
                     model.clip_weights()
+                if ema is not None and not skipped_step:
+                    ema.update(model)
                 loss_total += float(loss.detach()) * len(y)
                 n += len(y)
-            validation, _, _ = spec.evaluate(model, loaders['validation'], device, loss_fn)
-            value = validation[criterion]
-            if value is None or not math.isfinite(value):
-                raise ValueError(f'Checkpoint criterion {criterion} is undefined on validation data')
-            better = best_value is None or (value < best_value if criterion == 'loss' else value > best_value)
+            evaluated_model = ema.model if ema is not None else model
+            calibration = (calibrate_batch_norm(evaluated_model, loaders['calibration'], device)
+                           if ema is not None else None)
+            policy = {'weights': 'ema' if ema is not None else 'raw',
+                      'ema_decay': options.get('ema_decay', 0.0),
+                      'ema_updates': ema.updates if ema is not None else 0,
+                      'training_metrics_weights': 'raw',
+                      'batch_norm_calibration': calibration,
+                      'criterion': criterion, 'tiebreaker': tiebreaker}
+            validation, _, _ = spec.evaluate(evaluated_model, loaders['validation'], device, loss_fn)
+            better = checkpoint_is_better(validation, best_metrics, criterion, tiebreaker)
             if better:
-                best_value, best_epoch = value, epoch
+                best_metrics, best_epoch, best_policy = copy.deepcopy(validation), epoch, copy.deepcopy(policy)
                 torch.save({
-                    'model': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                    'model': {k: v.detach().cpu().clone() for k, v in evaluated_model.state_dict().items()},
                     'epoch': epoch, 'validation': validation, 'config': config,
+                    'checkpoint_policy': policy,
                     'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
                     'normalization': normalization}, run_dir / 'checkpoint.pt')
             history.append({'epoch': epoch, 'train_loss': loss_total / n, 'train_accuracy': correct / n,
                             'validation': validation, 'learning_rate': learning_rate,
-                            'amp_skipped_steps': skipped_steps})
+                            'amp_skipped_steps': skipped_steps, 'checkpoint_policy': policy})
             if scheduler is not None:
                 scheduler.step(validation['loss']) if options['scheduler'] == 'plateau' else scheduler.step()
             write_json(run_dir / 'history.json', history)
@@ -261,6 +382,7 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
             'seed': seed, 'subject_id': config.get('subject_id'),
             'validation': history[best_epoch - 1]['validation'],
             'best_checkpoint_epoch': best_epoch, 'epochs_trained': len(history),
+            'checkpoint_policy': best_policy,
             'elapsed_seconds': time.monotonic() - started,
             'experiment_id': experiment_identity(config), 'split_id': split['split_id'],
             'parameter_count': sum(p.numel() for p in model.parameters()),
@@ -316,6 +438,7 @@ def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds
         'parameter_count': sum(p.numel() for p in model.parameters()),
         'trainable_parameter_count': sum(p.numel() for p in model.parameters() if p.requires_grad),
         'best_checkpoint_epoch': checkpoint['epoch'], 'validation': validation, 'test': test,
+        'checkpoint_policy': checkpoint.get('checkpoint_policy', {'weights': 'raw'}),
         'epochs_trained': len(json.loads((run_dir / 'history.json').read_text())),
         'test_by_subject': group_metrics,
         'training_class_counts': counts.tolist(), 'class_weights': None if weights is None else weights.cpu().tolist(),

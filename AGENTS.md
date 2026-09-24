@@ -2,27 +2,15 @@
 
 These instructions apply to this repository and all its subdirectories.
 
-## Autonomous delegation
+## Subagents
 
-- The user authorizes proactive delegation. For substantial tasks with useful
-  independent subtasks, use **2–4 subagents** without asking the user to choose
-  agents, divide the work, or approve routine delegation.
-- The primary agent chooses subtasks based on the user's request. Useful roles
-  include implementation, an independent correctness review, analysis of saved
-  results, and verification or documentation.
-- Respect the environment's concurrency limits. If fewer subagent slots are
-  available, use the available slots and stage additional work only when useful.
-- Delegate concrete, bounded tasks with the necessary context and constraints.
-  Give editing agents distinct file ownership to prevent conflicting changes.
-- Continue useful work in the primary agent while subagents work. Avoid
-  duplicating their tasks, and communicate discoveries that affect their work.
-- The primary agent owns integration, review, appropriate verification, and the
-  final response. Check subagent findings before presenting them as established.
-- Do not create busywork to meet an agent count. Handle trivial edits, short
-  answers, and tasks that cannot usefully be divided directly. Use fewer agents
-  when the task or available capacity warrants it.
-- Apply these project instructions and the user's current constraints to every
-  subagent. Delegation does not authorize additional actions or broader scope.
+- **Do not use subagents unless the user explicitly requests them for the task.**
+  Work directly by default; task complexity does not authorize delegation.
+- This replaces the previous authorization for proactive delegation and the
+  recommendation to use 2–4 subagents.
+- When explicitly requested, give subagents bounded tasks, respect concurrency
+  limits, and apply all project instructions and current user constraints.
+  The primary agent remains responsible for integration and verification.
 
 ## Execution and verification
 
@@ -49,9 +37,14 @@ These instructions apply to this repository and all its subdirectories.
   and report unfavorable results as well as favorable ones.
 - Preserve saved configuration, split, checkpoint, and source provenance. Make
   experimental changes explicit instead of silently reinterpreting old runs.
+- Use interactive **`salloc`** launches. Do not create `.sbatch` files unless
+  the user explicitly requests that workflow again.
+- Use the existing Python environment. Do not add libraries or make `pytest`
+  or the development test suite a prerequisite for training or plotting.
+  Development tests remain separate from experiment launches.
 - When providing training commands, also provide checkpoint-diagnostic and
   result-plot commands in **separate copyable blocks**. State the working
-  directory, dataset path, and output folder clearly.
+  directory, dataset path, environment, resources, and output folder clearly.
 
 ## Communication
 

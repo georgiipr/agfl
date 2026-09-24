@@ -118,6 +118,61 @@ quadratic token dependence before/after masking. No sparse-complexity claim is
 made. `K=0` is a polynomial-order ablation, not a separately registered
 no-attention network. The no-attention model key has been removed as requested.
 
+## Explicit input-dependent hop coefficients
+
+`coefficient_conditioning="static"` retains a signed coefficient vector
+`alpha_base` per head, shared across tokens and trials. The explicit
+`trial_power` variant uses a zero-initialized linear map of normalized
+trial-wide log-power statistics to produce one bounded correction vector
+per trial. Its completed EEGNet comparison did not improve mean accuracy;
+see the [archived comparison](eegnet_agfl_conditioning.md).
+
+The current attention-only experiment selects `"token_contrast"`. With
+`P_0=V`, `P_1` from the configured propagation formula, and a head's token
+index `i`, it computes:
+
+```text
+d_i = concat(LN_features(V_i), LN_features(P_1[i] - V_i))
+r_i = tanh(G d_i)
+delta_i = (s / 2) * (r_i - mean_hops(r_i))
+alpha_i[k] = alpha_base[k] + delta_i[k]
+H_i = sum_{k=0..K} alpha_i[k] * Linear_k(P_k[i])
+```
+
+Both feature LayerNorms use epsilon `1e-5` and no affine parameters. The
+descriptor/gate arithmetic uses FP32 under autocast, preserving FP64 for
+reference calculations. `G` has shape `[K+1,2*d_h]`, no bias, and starts at
+zero without consuming random initialization draws. Its initial correction
+is zero. The four-head, eight-feature-per-head, `K=2` EEGNet study adds
+`4 * 3 * 16 = 192` parameters. Graph construction, Top-k support and hop
+propagation are unchanged; the first propagated hop is reused by the gate.
+
+For each token, `sum_k delta_i[k] = 0`, up to roundoff. Since each component
+of `r_i` lies in `[-1,1]`, the tight component bound is
+`|delta_i[k]| <= s*K/(K+1)`. At `s=0.5` and `K=2`, this is `1/3`.
+The base coefficients remain signed and learnable: neither the total
+coefficient magnitudes nor the feature norms are bounded by this statement.
+The option requires `K>=1`, at least two features per head, identity
+coefficient activation, learnable coefficients and positive finite `s`.
+
+For the value-only polynomial preset, the output is
+`sum_k diag(alpha_[:,k]) A^k V`. Its propagated features still use powers of
+`A`, but token-dependent diagonal coefficients generally do not commute with
+`A`. It is therefore not one scalar-coefficient polynomial in `A`; a global
+spectral-filter interpretation or a theorem requiring shared coefficients
+does not transfer automatically. The manuscript's page-3 allowance for
+per-node/input-dependent coefficients motivates this explicit extension,
+but does not specify this exact controller or prove an accuracy improvement.
+
+Related work on adaptive propagation in
+[DAGNN](https://arxiv.org/abs/2007.09296) and node-wise channel mixing in
+[ACM](https://arxiv.org/abs/2210.07606) motivates adapting neighborhood use.
+These are conceptual references, not EEG accuracy evidence or claims that
+this implementation reproduces either method. The
+[fixed EEGNet experiment](eegnet_agfl_token_routing.md) retains the previous
+backbone, preprocessing and training recipe and measures static/token-routed
+AGFL against MHA and Linformer rank 4.
+
 ## Comparable attention baselines
 
 All five attention mechanisms are injected into the same chosen backbone for

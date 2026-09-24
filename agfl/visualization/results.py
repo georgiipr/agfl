@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 
 from agfl.metrics import classification_metrics
+from agfl.analysis import attention_display_name
 from agfl.config import experiment_selection
 from agfl.result_paths import diagnostic_manifest_paths
 
@@ -14,7 +15,12 @@ from agfl.result_paths import diagnostic_manifest_paths
 def selection_label(run):
     model, attention = experiment_selection(run['config'])
     subject = run['config'].get('subject_id')
-    return f'{model} / {attention}' + (f' / {subject}' if subject else '')
+    label = attention_display_name(attention, run['config'].get('attention_options', run['config']['model_options']))
+    return f'{model} / {label}' + (f' / {subject}' if subject else '')
+
+
+def summary_label(summary):
+    return summary.get('attention_label') or attention_display_name(summary['attention'], summary.get('attention_options'))
 
 from .common import FigureWriter, slug
 
@@ -61,15 +67,17 @@ def plot_history(writer, run, prefix):
         writer.skip(prefix + '/training', 'Empty training history')
         return
     epochs = [row['epoch'] for row in history]
+    averaged = run.get('checkpoint_policy', {}).get('weights') == 'ema'
+    validation_label = 'Validation (EMA, train-calibrated BN)' if averaged else 'Validation'
     figure, axes = writer.plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
-    axes[0].plot(epochs, [r['train_loss'] for r in history], label='Train')
-    axes[0].plot(epochs, [r['validation']['loss'] for r in history], label='Validation')
+    axes[0].plot(epochs, [r['train_loss'] for r in history], label='Train (live weights)' if averaged else 'Train')
+    axes[0].plot(epochs, [r['validation']['loss'] for r in history], label=validation_label)
     axes[0].set(title='Loss', ylabel='Loss')
     for metric, title in zip(METRICS, TITLES):
         axes[1].plot(epochs, [r['validation'].get(metric) if r['validation'].get(metric) is not None else np.nan for r in history], label=title)
     if all('train_accuracy' in row for row in history):
         axes[1].plot(epochs, [r['train_accuracy'] for r in history], linestyle='--', label='Training accuracy (train mode)')
-    axes[1].set(title='Validation metrics / training accuracy', ylabel='Score', ylim=(0, 1))
+    axes[1].set(title='EMA validation / live training accuracy' if averaged else 'Validation metrics / training accuracy', ylabel='Score', ylim=(0, 1))
     axes[2].plot(epochs, [r['learning_rate'] for r in history])
     axes[2].set(title='Learning rate', ylabel='Learning rate')
     for axis in axes:
@@ -81,6 +89,18 @@ def plot_history(writer, run, prefix):
     axes[1].legend(fontsize=8)
     figure.suptitle(f"{run['dataset']} / {selection_label(run)} / seed {run['seed']}")
     writer.save(figure, prefix + '/training', 'Training loss, validation metrics and LR; test data do not enter epoch selection.')
+    if all(row['validation'].get('per_class') for row in history):
+        figure, axis = writer.plt.subplots(figsize=(9, 4), constrained_layout=True)
+        names = class_names(run, len(history[0]['validation']['per_class']))
+        for index, name in enumerate(names):
+            values = [row['validation']['per_class'][index]['recall'] for row in history]
+            axis.plot(epochs, [np.nan if value is None else value for value in values], label=name, alpha=.8)
+        axis.axvline(run['best_checkpoint_epoch'], color='black', linestyle=':', label='Selected checkpoint')
+        axis.set(xlabel='Epoch', ylabel='Recall', ylim=(0, 1.02),
+                 title=f'{validation_label}: per-class recall / {selection_label(run)}')
+        axis.legend(fontsize=8)
+        writer.save(figure, prefix + '/validation_class_recall',
+                    'Validation-only class recall during training; inspect gains and regressions together.')
 
 
 def plot_predictions(writer, run, partition, prefix):
@@ -121,7 +141,7 @@ def plot_predictions(writer, run, partition, prefix):
     if available:
         axis.plot([0, 1], [0, 1], 'k--', linewidth=.8)
         axis.set(xlabel='False positive rate', ylabel='True positive rate', xlim=(0, 1), ylim=(0, 1),
-                 title=f"{partition} one-vs-rest ROC / seed {run['seed']}")
+                 title=f"{partition} ROC / {selection_label(run)} / seed {run['seed']}")
         axis.legend(fontsize=8)
         writer.save(figure, f'{prefix}/{partition}_roc', 'ROC curves from this seed only; repeated test subjects are not pooled across seeds.')
     else:
@@ -139,12 +159,37 @@ def plot_comparison(writer, experiments, runs_by_experiment, prefix, title):
                 axis.scatter(position + np.linspace(-.12, .12, len(values)), values, s=18, alpha=.7)
                 axis.errorbar(position, summary['mean'], yerr=summary['std'], fmt='ks', capsize=5)
             axis.text(position, 1.02, f'n={len(values)}', ha='center', fontsize=8)
-        axis.set(xticks=range(len(experiments)), xticklabels=[f"{e['model']} / {e['attention']}\n{e.get('subject_id') or 'cohort'} / {e['experiment_id'][:8]}" for e in experiments],
+        axis.set(xticks=range(len(experiments)), xticklabels=[f"{e['model']} / {summary_label(e)}\n{e.get('subject_id') or 'cohort'} / {e['experiment_id'][:8]}" for e in experiments],
                  ylim=(0, 1.1), title=metric_title, ylabel='Test score')
         axis.tick_params(axis='x', rotation=30)
         axis.grid(axis='y', alpha=.2)
     figure.suptitle(title)
     writer.save(figure, prefix, 'Points are seeds; black squares and bars show mean and sample SD, not confidence intervals. IDs map to aggregation.json.')
+
+
+def plot_class_comparisons(writer, summaries):
+    groups = defaultdict(list)
+    for row in summaries:
+        groups[(row['comparison_id'], row['partition'])].append(row)
+    for (family, partition), records in groups.items():
+        experiments = sorted({row['experiment_id'] for row in records})
+        classes = sorted({row['class_id'] for row in records})
+        names = {row['class_id']: row['class_name'] for row in records}
+        figure, axis = writer.plt.subplots(figsize=(max(9, len(classes) * 2), 5), constrained_layout=True)
+        width = .8 / len(experiments)
+        for offset, experiment in enumerate(experiments):
+            rows = {row['class_id']: row for row in records if row['experiment_id'] == experiment}
+            sample = next(iter(rows.values()))
+            values = [rows[index]['recall_mean'] if index in rows and rows[index]['recall_mean'] is not None else np.nan for index in classes]
+            errors = [(rows[index]['recall_std'] or 0) if index in rows else 0 for index in classes]
+            positions = np.arange(len(classes)) + (offset - (len(experiments) - 1) / 2) * width
+            axis.bar(positions, values, width, yerr=errors, capsize=3,
+                     label=f"{sample['attention_label']} / {experiment[:8]}")
+        axis.set(xticks=np.arange(len(classes)), xticklabels=[names[index] for index in classes],
+                 ylim=(0, 1.12), ylabel='Recall', title=f'{partition.capitalize()} class recall / matched protocol')
+        axis.legend(fontsize=8)
+        writer.save(figure, f'comparisons/{slug(family)}/{partition}_class_recall',
+                    'Class recall averaged over seeds; bars are sample SD (zero-length for a single defined seed), not confidence intervals. See per_class_summary.csv for coverage.')
 
 
 def paired_differences(agfl_runs, baseline_runs, metric):
@@ -200,6 +245,7 @@ def plot_diagnostic_comparisons(writer, diagnostics_root, runs_by_experiment):
 
 def generate_result_plots(aggregation, output_dir, diagnostics_root=None):
     writer = FigureWriter(output_dir)
+    plot_class_comparisons(writer, aggregation.get('per_class', []))
     by_experiment, families = defaultdict(list), defaultdict(list)
     for source in aggregation['sources']:
         run = json.loads(Path(source).read_text())
@@ -232,7 +278,7 @@ def generate_result_plots(aggregation, output_dir, diagnostics_root=None):
                 stats = experiment['metrics']['test_' + metric]
                 if stats['mean'] is not None:
                     axis.errorbar(experiment['parameter_count'], stats['mean'], yerr=stats['std'], fmt='o', capsize=3)
-                    axis.annotate(f"{experiment['attention']} {experiment['experiment_id'][:6]}",
+                    axis.annotate(f"{summary_label(experiment)} {experiment['experiment_id'][:6]}",
                                   (experiment['parameter_count'], stats['mean']), xytext=(3, 5), textcoords='offset points', fontsize=7)
             axis.set(xlabel='Parameters', ylabel=label, ylim=(0, 1))
         writer.save(figure, prefix + '/capacity', 'Parameter counts versus mean test scores; bars are sample SD across seeds.')
@@ -244,8 +290,10 @@ def generate_result_plots(aggregation, output_dir, diagnostics_root=None):
         figure, axis = writer.plt.subplots(figsize=(7, 4), constrained_layout=True)
         axis.axhline(0, color='black', linewidth=.8)
         axis.plot([str(seed) for seed, _ in pairs], [delta for _, delta in pairs], 'o')
-        axis.set(xlabel='Matched seed', ylabel=f'AGFL − {comparison["baseline"]}: {metric}',
-                 title=f"Paired test differences (n={len(pairs)})")
+        left = comparison.get('agfl_label', 'AGFL')
+        right = comparison.get('baseline_label', comparison['baseline'])
+        axis.set(xlabel='Matched seed', ylabel=f'Test {metric} difference',
+                 title=f"{left} − {right}\nMatched test differences (n={len(pairs)})")
         name = f"paired/{comparison['agfl_experiment_id']}_{comparison['baseline_experiment_id']}_{metric}"
         writer.save(figure, name, 'Only identical seed/split/data/protocol pairs are shown. Seed-level inference remains exploratory.')
     if diagnostics_root is not None:

@@ -4,5 +4,8 @@ EEG_DEFAULTS = {
     'spatial_readout': 'learned', 'attention_residual': True,
     'batch_norm_momentum': .1, 'batch_norm_eps': 1e-5,
     'attention_dropout': 0.0, 'initialization': 'pytorch',
+    # Compatibility selector for archived power-study configurations. Normal
+    # EEGNet uses its original mean-pooling backbone; no power branch is built.
+    'temporal_statistics': 'mean',
 }
 ECG_DEFAULTS = {**EEG_DEFAULTS, 'pk1': 4, 'pk2': 4, 'attention_axis': 'time'}

@@ -92,14 +92,40 @@ def propagate(graph, values, degree, variant, norm='feature', eps=1e-6):
 
 
 class GraphConstructor(nn.Module):
-    def __init__(self, dim, scaling='temperature'):
+    def __init__(self, dim, scaling='temperature', temperature_init=1.0):
         super().__init__()
-        self.temperature = nn.Parameter(torch.tensor(1.0), requires_grad=scaling == 'temperature')
+        if (isinstance(temperature_init, bool) or not isinstance(temperature_init, (int, float))
+                or not 0.1 <= temperature_init <= 5.0 or not math.isfinite(temperature_init)):
+            raise ValueError('temperature_init must be a finite number in [0.1, 5.0]')
+        if scaling != 'temperature' and temperature_init != 1.0:
+            raise ValueError('Nondefault temperature_init requires score_scaling=temperature')
+        # Retain the scalar state-dict entry and consume no random draws. Old
+        # checkpoints overwrite this initialization with their learned value.
+        self.temperature = nn.Parameter(torch.tensor(float(temperature_init)),
+                                        requires_grad=scaling == 'temperature')
         self.dim, self.scaling = dim, scaling
 
     def forward(self, q, k=None):
         raw = similarity_scores(q, q if k is None else k)
         return raw, scale_scores(raw, self.dim, self.temperature, self.scaling)
+
+
+class _IdentityLinear(nn.Linear):
+    """A Linear with deterministic initialization and unchanged state keys."""
+    def reset_parameters(self):
+        # Linear.__init__ calls this after allocating its parameters. Avoid its
+        # random initialization so later Q/K/V/output weights keep their draws.
+        nn.init.eye_(self.weight)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
+
+
+class _ZeroLinear(nn.Linear):
+    """A learnable zero map without consuming initialization random draws."""
+    def reset_parameters(self):
+        nn.init.zeros_(self.weight)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
 
 
 class GraphFilter(nn.Module):
@@ -108,6 +134,21 @@ class GraphFilter(nn.Module):
         self.options = options
         if type(options['learnable_coefficients']) is not bool:
             raise ValueError('learnable_coefficients must be a boolean')
+        self.conditioning = options.get('coefficient_conditioning', 'static')
+        if self.conditioning not in {'static', 'trial_power', 'token_contrast'}:
+            raise ValueError('coefficient_conditioning must be static, trial_power or token_contrast')
+        self.conditioning_scale = options.get('coefficient_conditioning_scale', 0.5)
+        if (isinstance(self.conditioning_scale, bool)
+                or not isinstance(self.conditioning_scale, (int, float))
+                or not math.isfinite(self.conditioning_scale) or self.conditioning_scale <= 0):
+            raise ValueError('coefficient_conditioning_scale must be a finite positive number')
+        if self.conditioning != 'static':
+            if options['coefficient_activation'] != 'identity' or not options['learnable_coefficients']:
+                raise ValueError(f'{self.conditioning} conditioning requires identity activation and learnable coefficients')
+            if dim < 2:
+                raise ValueError(f'{self.conditioning} conditioning requires at least two features per head')
+        if self.conditioning == 'token_contrast' and options['K'] < 1:
+            raise ValueError('token_contrast conditioning requires K >= 1')
         if options['coefficient_init'] == 'zeros':
             if options['coefficient_activation'] == 'relu':
                 raise ValueError('Zero-initialized ReLU coefficients cannot learn; use a nonzero coefficient_init')
@@ -115,13 +156,18 @@ class GraphFilter(nn.Module):
                 raise ValueError('Frozen zero coefficients disable graph filtering; use a nonzero coefficient_init')
         taps = options['K'] + 1
         initial = torch.zeros(taps)
-        if options['coefficient_init'] == 'one_hop':
+        if options['coefficient_init'] in {'one_hop', 'identity_one_hop'}:
             if taps < 2 or options['coefficient_activation'] != 'identity':
-                raise ValueError('one_hop initialization requires K >= 1 and identity coefficients')
-            # Start with A @ V. With dense Q/K/V attention, sqrt(dim) score
-            # scaling and value-only taps, this is exactly the MHA formula.
-            # Zero higher-order taps remain learnable under identity activation.
-            initial[1] = 1.
+                raise ValueError(f"{options['coefficient_init']} initialization requires K >= 1 and identity coefficients")
+            if options['coefficient_init'] == 'identity_one_hop':
+                # Preserve a local value path from initialization without
+                # increasing the sum of tap weights; higher taps still learn.
+                initial[:2] = 0.5
+            else:
+                # With dense Q/K/V attention, sqrt(dim) scaling and value-only
+                # taps, A @ V is exactly the MHA formula. Zero higher-order
+                # taps remain learnable under identity activation.
+                initial[1] = 1.
         elif options['coefficient_init'] != 'zeros':
             initial = torch.ones(taps) if options['coefficient_init'] == 'uniform' else torch.tensor([2.**-k for k in range(taps)])
             initial /= initial.sum()
@@ -131,22 +177,93 @@ class GraphFilter(nn.Module):
                 initial = torch.logit(initial.clamp(.001, .999))
         self.alpha_logits = nn.Parameter(initial, requires_grad=options['learnable_coefficients'])
         self.projection = options['filter_projection']
+        projection_init = options.get('filter_projection_init', 'pytorch')
+        if projection_init not in ('pytorch', 'identity'):
+            raise ValueError('filter_projection_init must be pytorch or identity')
+        if projection_init == 'identity' and self.projection not in {'shared', 'separate'}:
+            raise ValueError('Identity filter_projection_init requires shared or separate filter_projection')
+        projection_layer = _IdentityLinear if projection_init == 'identity' else nn.Linear
         if self.projection == 'separate':
-            self.W = nn.ModuleList([nn.Linear(dim, dim, bias=False) for _ in range(taps)])
+            self.W = nn.ModuleList([projection_layer(dim, dim, bias=False) for _ in range(taps)])
         elif self.projection == 'shared':
-            self.W = nn.Linear(dim, dim, bias=False)
+            self.W = projection_layer(dim, dim, bias=False)
         else:
             self.W = nn.Identity()
+        # No bias: alpha_logits already supplies each hop's static offset.
+        # The zero map preserves the selected static recipe at initialization,
+        # including RNG state and the initialization of every later parameter.
+        descriptor_dim = 2 * dim if self.conditioning == 'token_contrast' else dim
+        self.coefficient_gate = (_ZeroLinear(descriptor_dim, taps, bias=False)
+                                 if self.conditioning != 'static' else None)
 
-    def forward(self, graph, values):
+    def _static_coefficients(self):
         activations = {'identity': lambda x: x, 'relu': F.relu, 'sigmoid': torch.sigmoid,
                        'softmax': lambda x: x.softmax(-1)}
-        alpha = activations[self.options['coefficient_activation']](self.alpha_logits)
+        return activations[self.options['coefficient_activation']](self.alpha_logits)
+
+    def coefficient_values(self, values, graph=None, *, first_hop=None):
+        """Effective coefficients for these head-local value features.
+
+        Static/trial-power coefficients have axes [batch, hop]; token-contrast
+        coefficients have axes [batch, token, hop]. Token routing redistributes
+        the hop mixture without changing its sum. Neither descriptor uses batch
+        statistics, labels, caches or learnable normalization.
+        """
+        alpha = self._static_coefficients().unsqueeze(0).expand(values.shape[0], -1)
+        if self.coefficient_gate is None:
+            return alpha
+        if self.conditioning == 'token_contrast':
+            if first_hop is None:
+                if graph is None:
+                    raise ValueError('token_contrast coefficients require graph or first_hop')
+                first_hop = tuple(propagate(graph, values, 1, self.options['agfl_variant'],
+                                            self.options['hop_normalization']))[1]
+            if first_hop.shape != values.shape:
+                raise ValueError('token_contrast first_hop must match value dimensions')
+            with torch.autocast(device_type=values.device.type, enabled=False):
+                working = values if values.dtype == torch.float64 else values.float()
+                # Promote separately: even finite half-precision operands can
+                # overflow during subtraction before a later conversion.
+                contrast = first_hop.to(working.dtype) - working
+                descriptor = torch.cat((
+                    F.layer_norm(working, (values.shape[-1],), eps=1e-5),
+                    F.layer_norm(contrast, (values.shape[-1],), eps=1e-5)), dim=-1)
+                routed = F.linear(descriptor, self.coefficient_gate.weight.to(working.dtype)).tanh()
+                delta = (self.conditioning_scale / 2) * (routed - routed.mean(dim=-1, keepdim=True))
+                coefficients = alpha.to(working.dtype).unsqueeze(1) + delta
+            return coefficients.to(self.alpha_logits.dtype)
+        # Squaring float16 values before promotion can overflow even when all
+        # inputs are finite. Keep descriptor and gate arithmetic in float32
+        # under AMP, while preserving float64 reference calculations.
+        with torch.autocast(device_type=values.device.type, enabled=False):
+            working = values if values.dtype == torch.float64 else values.float()
+            log_power = (working.square().mean(dim=-2) + 1e-6).log()
+            descriptor = F.layer_norm(log_power, (values.shape[-1],), eps=1e-5)
+            gate = F.linear(descriptor, self.coefficient_gate.weight.to(working.dtype))
+            coefficients = alpha.to(working.dtype) + self.conditioning_scale * gate.tanh()
+        return coefficients.to(self.alpha_logits.dtype)
+
+    def forward(self, graph, values):
+        if self.conditioning == 'token_contrast':
+            # Reuse exactly the propagated features being mixed. No duplicate
+            # graph construction, extra graph hop, or retained autograd cache.
+            hops = tuple(propagate(graph, values, self.options['K'], self.options['agfl_variant'],
+                                   self.options['hop_normalization']))
+            alpha = self.coefficient_values(values, first_hop=hops[1])
+            out = None
+            for hop, propagated in enumerate(hops):
+                projected = self.W[hop](propagated) if self.projection == 'separate' else self.W(propagated)
+                term = alpha[:, :, hop, None].to(projected.dtype) * projected
+                out = term if out is None else out + term
+            return out
+        # Preserve the historical scalar-per-hop arithmetic for static runs.
+        alpha = self._static_coefficients() if self.coefficient_gate is None else self.coefficient_values(values)
         out = None
         for hop, propagated in enumerate(propagate(graph, values, self.options['K'], self.options['agfl_variant'],
                                                   self.options['hop_normalization'])):
             projected = self.W[hop](propagated) if self.projection == 'separate' else self.W(propagated)
-            term = alpha[hop] * projected
+            coefficient = alpha[hop] if self.coefficient_gate is None else alpha[:, hop, None, None].to(projected.dtype)
+            term = coefficient * projected
             out = term if out is None else out + term
         return out
 
@@ -167,7 +284,7 @@ class AGFL(nn.Module):
             'graph_normalization': {'softmax', 'row', 'symmetric', 'none'},
             'score_scaling': {'sqrt_dim', 'temperature', 'raw'},
             'coefficient_activation': {'identity', 'relu', 'softmax', 'sigmoid'},
-            'coefficient_init': {'uniform', 'lower_order', 'zeros', 'one_hop'},
+            'coefficient_init': {'uniform', 'lower_order', 'zeros', 'one_hop', 'identity_one_hop'},
             'projection': {'qkv', 'split_input'},
             'filter_projection': {'none', 'shared', 'separate'},
             'hop_normalization': {'feature', 'frobenius'},
@@ -185,7 +302,10 @@ class AGFL(nn.Module):
         self.layer_idx, self.depth = 0, 1
         self.qkv = nn.Linear(dim, 3 * dim, bias=options['qkv_bias']) if options['projection'] == 'qkv' else None
         # This order exactly matches the historical default's initialization.
-        self.builders = nn.ModuleList([GraphConstructor(self.dim_h, options['score_scaling']) for _ in range(heads)])
+        self.builders = nn.ModuleList([
+            GraphConstructor(self.dim_h, options['score_scaling'], options.get('temperature_init', 1.0))
+            for _ in range(heads)
+        ])
         self.filters = nn.ModuleList([GraphFilter(self.dim_h, options) for _ in range(heads)])
         self.proj = nn.Linear(dim, dim)
         self.last_adj = None

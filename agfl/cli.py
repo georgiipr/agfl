@@ -30,15 +30,50 @@ def _diagnostic_arguments(parser):
     parser.add_argument('--embedding', choices=('pca', 'tsne', 'umap'), default='tsne')
 
 
-def _session_plot_commands(root):
+def _session_plot_commands(root, *, device='cuda', stream=None):
     import shlex
     root = Path(root).expanduser().resolve()
-    print('Generate checkpoint diagnostic plots on the experiment machine:')
-    print(f'python main.py diagnose-session {shlex.quote(str(root))} --device cuda')
-    print('Generate result plots and tables:')
-    print(f'python main.py analyze {shlex.quote(str(root))} --plots')
-    print(f'Download for review: {root / "report"}')
+    print('Generate checkpoint diagnostic plots on the experiment machine:', file=stream)
+    print(f'python main.py diagnose-session {shlex.quote(str(root))} '
+          f'--device {shlex.quote(str(device))} --partition validation --embedding tsne', file=stream)
+    print('Generate result plots and tables:', file=stream)
+    print(f'python main.py analyze {shlex.quote(str(root))} --plots', file=stream)
+    print(f'Download for review: {root / "report"}', file=stream)
+    print(f'Keep checkpoints and working files on the cluster: {root / "artifacts"}', file=stream)
+
+
+def _generate_session_report(root, device):
+    """Run existing report commands after training locks have been released."""
+    root = Path(root).expanduser().resolve()
+    print(f'Generating checkpoint diagnostics and result plots: {root}', flush=True)
+    try:
+        main(['diagnose-session', str(root), '--device', str(device),
+              '--partition', 'validation', '--embedding', 'tsne'])
+        main(['analyze', str(root), '--plots'])
+    except BaseException:
+        print('Automatic report generation did not finish. Completed training artifacts '
+              'are retained; recover the report without retraining:', file=sys.stderr)
+        _session_plot_commands(root, device=device, stream=sys.stderr)
+        raise
+    print(f'Report generation finished. Download: {root / "report"}')
     print(f'Keep checkpoints and working files on the cluster: {root / "artifacts"}')
+
+
+def _finish_training_reports(configs, *, automatic):
+    sessions = {}
+    for config in configs:
+        root = Path(config['output_dir']).expanduser().resolve()
+        sessions.setdefault(root, []).append(str(config['device']))
+    for root, devices in sorted(sessions.items()):
+        device = devices[0]
+        print('\nTraining finished.')
+        if automatic:
+            if len(set(devices)) > 1:
+                print(f'Multiple training devices in this session; using {device} '
+                      'from its first configuration for checkpoint diagnostics.')
+            _generate_session_report(root, device)
+        else:
+            _session_plot_commands(root, device=device)
 
 
 def _report_destination(parser, output, session):
@@ -59,19 +94,31 @@ def main(argv=None):
     run.add_argument('--dataset')
     run.add_argument('--dry-run', action='store_true')
     run.add_argument('--skip-completed', action='store_true', help='Keep matching completed seeds; restart incomplete seeds')
+    run.add_argument('--report', action='store_true', help='After training, generate validation checkpoint diagnostics and result plots')
     sweep = commands.add_parser('sweep', help='Launch a comparison/ablation matrix; matching seed runs are overwritten')
     _configuration_arguments(sweep)
     sweep.add_argument('--dry-run', action='store_true')
     sweep.add_argument('--skip-completed', action='store_true', help='Keep matching completed seeds; restart incomplete seeds')
-    tune = commands.add_parser('tune-eegnet', help='Validation-only EEGNet + AGFL search for four-class BCI IV 2a')
+    sweep.add_argument('--report', action='store_true', help='After training, generate validation checkpoint diagnostics and result plots')
+    tune = commands.add_parser('tune-eegnet', help='Validation-selected EEGNet + AGFL search; test only selected checkpoints')
     tune.add_argument('--data-dir', default='../ml', help='Directory containing A01T.gdf ... A09T.gdf')
     tune.add_argument('--output-dir', default='results/eegnet-bci2a-search')
     tune.add_argument('--subjects', type=int, nargs='+', default=list(range(1, 10)))
     tune.add_argument('--seeds', type=int, nargs='+', default=list(range(5)))
-    tune.add_argument('--candidate', action='append', help='Select a named candidate; repeat to choose several (default: original five; spatial_recombine, spatial_batch48 and spatial_qkv_* follow-ups are opt-in)')
+    candidate_source = tune.add_mutually_exclusive_group()
+    candidate_source.add_argument('--candidate', action='append', help=(
+        'Select a named candidate; repeat to choose several (default: original five). '
+        'Follow-ups are opt-in: spatial_recombine, spatial_batch48, spatial_qkv_* '
+        '(dense/sparse/renorm/top3), and refinements spatial_qkv_temp1, spatial_qkv_temp05, '
+        'spatial_qkv_identity_temp1, spatial_qkv_identity_temp05. '
+        'Include spatial_qkv_sparse as the fixed-scale refinement control.'))
+    candidate_source.add_argument('--candidate-set', help=(
+        'Use a named bounded candidate group, such as capacity; '
+        'cannot be combined with --candidate.'))
     tune.add_argument('--epochs', type=int, help='Override epoch budget, e.g. 2 for a separate smoke check')
     tune.add_argument('--dry-run', action='store_true', help='Print configurations without loading recordings')
     tune.add_argument('--restart', action='store_true', help='Retrain completed candidates too; otherwise resume matching completed runs')
+    tune.add_argument('--report', action='store_true', help='After selected-checkpoint evaluation, generate validation diagnostics and result plots')
     plan = commands.add_parser('plan', help='Show resolved settings and launch command without loading data')
     _configuration_arguments(plan)
     analysis = commands.add_parser('analyze')
@@ -230,9 +277,14 @@ def main(argv=None):
         print(f'Audit plot index: {args.audit_dir}/figures/index.md')
         return
     if args.command == 'tune-eegnet':
-        from .models.eegnet.search import search_configs, run_search
+        from .models.eegnet.search import CANDIDATE_SETS, search_configs, run_search
+        candidates = args.candidate
+        if args.candidate_set is not None:
+            if args.candidate_set not in CANDIDATE_SETS:
+                parser.error('Unknown candidate set. Choose from: ' + ', '.join(CANDIDATE_SETS))
+            candidates = list(CANDIDATE_SETS[args.candidate_set])
         configs = search_configs(args.data_dir, args.output_dir, args.subjects, args.seeds,
-                                 args.candidate, args.epochs)
+                                 candidates, args.epochs)
         if args.dry_run:
             print(json.dumps(configs, indent=2))
             return
@@ -241,7 +293,10 @@ def main(argv=None):
         run_search(configs, restart=args.restart)
         root = Path(args.output_dir).expanduser().resolve()
         print(f'Overall selected accuracy and per-subject results: {root / "report/search_result.json"}')
-        _session_plot_commands(root)
+        _finish_training_reports(
+            [config for experiments in configs.values() for config in experiments],
+            automatic=args.report,
+        )
         return
     document = read_config(args.config) if args.config else load_preset(args.preset) if args.preset else {}
     is_sweep = 'base' in document or 'experiments' in document
@@ -278,9 +333,7 @@ def main(argv=None):
         print(f"Launching {config['dataset']}/{config['model']} subject={config.get('subject_id') or 'cohort'} attention={config['attention']} ({config['model_variant']}) "
               f"seeds={config['seeds']} epochs={config['training']['epochs']} device={config['device']}")
         run_experiment(config, skip_completed=args.skip_completed)
-    for root in sorted({config['output_dir'] for config in resolved_configs}):
-        print('\nTraining finished.')
-        _session_plot_commands(root)
+    _finish_training_reports(resolved_configs, automatic=args.report)
 
 
 if __name__ == '__main__':

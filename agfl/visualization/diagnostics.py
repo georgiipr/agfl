@@ -210,27 +210,335 @@ def graph_figures(writer, name, state, metadata, info, first_input):
     return stats
 
 
+def _base_coefficients(graph_filter):
+    """Activated checkpoint parameters, before any trial-dependent adjustment."""
+    alpha = graph_filter.alpha_logits.detach()
+    mode = graph_filter.options['coefficient_activation']
+    if mode == 'softmax':
+        return alpha.softmax(-1)
+    if mode == 'sigmoid':
+        return alpha.sigmoid()
+    if mode == 'relu':
+        return alpha.relu()
+    return alpha
+
+
+class TrialCoefficientCapture:
+    """Capture every selected trial/token from the actual per-head inputs."""
+
+    def __init__(self, model):
+        from agfl.attention.agfl.layer import AGFL
+        self.layers, self.hooks = {}, []
+        self.sample_ids = None
+        for name, module in model.named_modules():
+            if not isinstance(module, AGFL) or module.options.get('coefficient_conditioning', 'static') == 'static':
+                continue
+            self.layers[name] = {
+                'module': module,
+                'coefficients': [[] for _ in module.filters],
+                'sample_ids': [[] for _ in module.filters],
+                'hop_diagnostics': [[] for _ in module.filters],
+            }
+            for head, graph_filter in enumerate(module.filters):
+                self.hooks.append(graph_filter.register_forward_hook(self._capture(name, head)))
+
+    def start_batch(self, sample_ids):
+        self.sample_ids = np.asarray(sample_ids, dtype=str)
+        if self.sample_ids.ndim != 1:
+            raise ValueError('Coefficient diagnostic sample IDs must be one-dimensional')
+
+    def _capture(self, name, head):
+        def hook(graph_filter, args, output):
+            import torch
+            if self.sample_ids is None:
+                raise ValueError('Set diagnostic sample IDs before capturing coefficients')
+            # GraphFilter receives (graph, values). Neither the graph nor a
+            # pooled trial descriptor alone reconstructs token-local routing.
+            values = args[1].detach()
+            if len(values) != len(self.sample_ids):
+                raise ValueError('Coefficient diagnostic batch and sample IDs differ')
+            with torch.no_grad():
+                token_local = graph_filter.options.get('coefficient_conditioning', 'static') == 'token_contrast'
+                if token_local:
+                    from agfl.attention.agfl.layer import propagate
+                    hops = tuple(propagate(args[0].detach(), values, graph_filter.options['K'],
+                                           graph_filter.options['agfl_variant'],
+                                           graph_filter.options['hop_normalization']))
+                    effective = graph_filter.coefficient_values(values, first_hop=hops[1])
+                    # Inspect actual propagated representations, not powers of
+                    # a graph averaged across trials. Norms are descriptive;
+                    # cancellation and the later output projection still matter.
+                    stacked = torch.stack(hops, dim=-2)
+                    hop_norms = torch.linalg.vector_norm(stacked, dim=-1)
+                    normalized_hops = stacked / hop_norms.clamp_min(1e-12).unsqueeze(-1)
+                    cosines = normalized_hops @ normalized_hops.transpose(-1, -2)
+                    valid = hop_norms > 1e-12
+                    valid_pairs = valid.unsqueeze(-1) & valid.unsqueeze(-2)
+                    projected = torch.stack([
+                        graph_filter.W[hop](value) if graph_filter.projection == 'separate' else graph_filter.W(value)
+                        for hop, value in enumerate(hops)
+                    ], dim=-2)
+                    terms = projected * effective.to(projected.dtype).unsqueeze(-1)
+                    contribution_norms = torch.linalg.vector_norm(terms, dim=-1)
+                    self.layers[name]['hop_diagnostics'][head].append({
+                        'propagated_hop_cosines': cosines.cpu().numpy().copy(),
+                        'propagated_hop_cosine_valid': valid_pairs.cpu().numpy().copy(),
+                        'hop_contribution_norms': contribution_norms.cpu().numpy().copy(),
+                    })
+                else:
+                    effective = graph_filter.coefficient_values(values)
+                coefficients = effective.detach().cpu().numpy().copy()
+            expected_shape = ((len(values), values.shape[-2], graph_filter.alpha_logits.numel()) if token_local
+                              else (len(values), graph_filter.alpha_logits.numel()))
+            if coefficients.shape != expected_shape:
+                raise ValueError('Unexpected trial coefficient dimensions')
+            if not np.isfinite(coefficients).all():
+                raise ValueError('Nonfinite trial-conditioned coefficients')
+            self.layers[name]['coefficients'][head].append(coefficients)
+            self.layers[name]['sample_ids'][head].append(self.sample_ids.copy())
+        return hook
+
+
+def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partition):
+    """Save actual coefficients with explicit trial/head/(token)/hop axes."""
+    if not capture.layers:
+        return None
+    sample_ids = np.asarray(sample_ids, dtype=str)
+    labels = np.asarray(labels)
+    if sample_ids.ndim != 1 or labels.shape != sample_ids.shape or not len(sample_ids):
+        raise ValueError('Coefficient diagnostic IDs and labels must identify the same nonempty subset')
+    layers = {}
+    for name, state in capture.layers.items():
+        module = state['module']
+        token_local = module.options.get('coefficient_conditioning', 'static') == 'token_contrast'
+        per_head = []
+        for batches, id_batches in zip(state['coefficients'], state['sample_ids']):
+            if not batches or not np.array_equal(np.concatenate(id_batches), sample_ids):
+                raise ValueError(f'Trial coefficient order/count differs from diagnostic sample IDs: {name}')
+            per_head.append(np.concatenate(batches, axis=0))
+        effective = np.stack(per_head, axis=1)
+        base = np.stack([_base_coefficients(item).cpu().numpy() for item in module.filters])
+        scale = float(module.options.get('coefficient_conditioning_scale', .5))
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError('Conditioned coefficient diagnostics require a positive finite scale')
+        taps = effective.shape[-1]
+        base_broadcast = base[None, :, None, :] if token_local else base[None]
+        deltas = effective.astype(np.float64) - base_broadcast.astype(np.float64)
+        normalized = deltas / scale
+        # Centered tanh adjustments have a tighter attainable bound than the
+        # configured scale: scale/2 * (tanh(g) - mean_hops(tanh(g))).
+        delta_bound = scale * (taps - 1) / taps if token_local else scale
+        bound_normalized = deltas / delta_bound if delta_bound > 0 else np.zeros_like(deltas)
+        tolerance = max(1e-7, float(np.abs(base).max()) * np.finfo(effective.dtype).eps * taps * 8)
+        if not np.isfinite(deltas).all() or np.any(np.abs(deltas) > delta_bound + tolerance):
+            raise ValueError('Trial coefficient deltas exceed their configured conditioning bound')
+        delta_sum = deltas.sum(axis=-1)
+        if token_local and np.any(np.abs(delta_sum) > tolerance):
+            raise ValueError('Token coefficient adjustments do not sum to zero across hops')
+        gates = np.stack([item.coefficient_gate.weight.detach().cpu().numpy() for item in module.filters])
+        if not np.isfinite(gates).all():
+            raise ValueError('Nonfinite trial-conditioning gate weights')
+        suffix = '_token_coefficients' if token_local else '_trial_coefficients'
+        array_path = Path('filters') / (slug(name) + suffix + '.npz')
+        (writer.root / array_path).parent.mkdir(parents=True, exist_ok=True)
+        arrays = {
+            'sample_ids': sample_ids, 'labels': labels, 'base_coefficients': base,
+            'effective_coefficients': effective, 'coefficient_deltas': deltas,
+            'normalized_deltas': normalized, 'bound_normalized_deltas': bound_normalized,
+            'gate_weights': gates, 'head_indices': np.arange(effective.shape[1]),
+            'hop_orders': np.arange(taps),
+        }
+        if token_local:
+            arrays.update(token_indices=np.arange(effective.shape[2]),
+                          within_trial_token_std=effective.std(axis=2),
+                          delta_sum_over_hops=delta_sum)
+            hop_batches = state.get('hop_diagnostics', [])
+            if hop_batches and all(hop_batches):
+                for key in ('propagated_hop_cosines', 'propagated_hop_cosine_valid', 'hop_contribution_norms'):
+                    arrays[key] = np.stack([
+                        np.concatenate([batch[key] for batch in batches], axis=0)
+                        for batches in hop_batches
+                    ], axis=1)
+                    if arrays[key].shape[:3] != effective.shape[:3] or not np.isfinite(arrays[key]).all():
+                        raise ValueError('Invalid token hop diagnostics or trial/token count mismatch')
+        np.savez_compressed(writer.root / array_path, **arrays)
+        heads = []
+        for head in range(effective.shape[1]):
+            coefficients, delta = effective[:, head], deltas[:, head]
+            reduction_axes = (0, 1) if token_local else 0
+            heads.append({
+                'head': head,
+                'base_coefficients': base[head].tolist(),
+                'effective_mean': coefficients.mean(axis=reduction_axes).tolist(),
+                'effective_std': coefficients.std(axis=reduction_axes).tolist(),
+                'effective_min': coefficients.min(axis=reduction_axes).tolist(),
+                'effective_max': coefficients.max(axis=reduction_axes).tolist(),
+                'delta_mean': delta.mean(axis=reduction_axes).tolist(),
+                'delta_std': delta.std(axis=reduction_axes).tolist(),
+                'delta_mean_absolute': np.abs(delta).mean(axis=reduction_axes).tolist(),
+                'delta_max_absolute': np.abs(delta).max(axis=reduction_axes).tolist(),
+                'saturation_fraction': (np.abs(bound_normalized[:, head]) > .95).mean(axis=reduction_axes).tolist(),
+                'gate_frobenius_norm': float(np.linalg.norm(gates[head])),
+                'gate_learnable': module.filters[head].coefficient_gate.weight.requires_grad,
+            })
+            if token_local:
+                heads[-1].update({
+                    'effective_mean_per_token': coefficients.mean(axis=0).tolist(),
+                    'effective_std_per_token': coefficients.std(axis=0).tolist(),
+                    'within_trial_token_std_mean': coefficients.std(axis=1).mean(axis=0).tolist(),
+                    'within_trial_token_std_max': coefficients.std(axis=1).max(axis=0).tolist(),
+                    'delta_sum_over_hops_max_absolute': float(np.abs(delta_sum[:, head]).max()),
+                })
+                if 'propagated_hop_cosines' in arrays:
+                    valid = arrays['propagated_hop_cosine_valid'][:, head]
+                    counts = valid.sum(axis=(0, 1))
+                    total = (arrays['propagated_hop_cosines'][:, head] * valid).sum(axis=(0, 1))
+                    heads[-1].update({
+                        'propagated_hop_cosine_mean': [
+                            [float(total[left, right] / counts[left, right]) if counts[left, right] else None
+                             for right in range(taps)] for left in range(taps)],
+                        'propagated_hop_cosine_valid_counts': counts.tolist(),
+                        'hop_contribution_norm_mean': arrays['hop_contribution_norms'][:, head].mean(axis=(0, 1)).tolist(),
+                    })
+        layers[name] = {
+            'coefficient_conditioning': module.options.get('coefficient_conditioning', 'static'),
+            'coefficient_conditioning_scale': scale,
+            'samples': len(sample_ids), 'array_file': array_path.as_posix(),
+            'coefficient_array_axes': ['trial', 'head', 'token', 'hop'] if token_local else ['trial', 'head', 'hop'],
+            'base_array_axes': ['head', 'hop'],
+            'gate_array_axes': ['head', 'hop', 'descriptor_feature'],
+            'standard_deviation_ddof': 0, 'saturation_normalized_threshold': .95,
+            'attainable_delta_bound': delta_bound,
+            'saturation_normalization': 'attainable_delta_bound',
+            'summary_reduction_axes': ['trial', 'token'] if token_local else ['trial'],
+            'heads': heads,
+        }
+        if token_local:
+            layers[name].update({
+                'tokens': effective.shape[2], 'token_axis': getattr(module, 'token_axis', 'unspecified'),
+                'within_trial_token_std_axes': ['trial', 'head', 'hop'],
+                'delta_sum_over_hops_axes': ['trial', 'head', 'token'],
+                'delta_sum_over_hops_max_absolute': float(np.abs(delta_sum).max()),
+                'zero_sum_check_tolerance': tolerance,
+            })
+            if 'propagated_hop_cosines' in arrays:
+                layers[name].update({
+                    'propagated_hop_cosine_axes': ['trial', 'head', 'token', 'hop_left', 'hop_right'],
+                    'hop_contribution_norm_axes': ['trial', 'head', 'token', 'hop'],
+                    'hop_diagnostic_note': 'Cosines compare actual propagated hops before optional feature projections. '
+                                           'Pairs with a hop norm <= 1e-12 are marked invalid. Contribution norms include '
+                                           'hop projections and routed coefficients, before AGFL output projection/residual. '
+                                           'They are not causal importance and do not account for cancellation between terms.',
+                })
+            _token_coefficient_heatmaps(writer, name, effective, bound_normalized, partition)
+            continue
+        figure, axes = writer.plt.subplots(2, effective.shape[1], squeeze=False,
+                                          figsize=(4 * effective.shape[1], 7), constrained_layout=True)
+        limit = max(float(np.abs(effective).max()), 1e-12)
+        for head in range(effective.shape[1]):
+            for row, array, title in (
+                    (0, effective[:, head], 'Effective coefficients'),
+                    (1, normalized[:, head], 'Delta / conditioning scale')):
+                axis = axes[row, head]
+                bound = limit if row == 0 else 1.
+                artist = axis.imshow(array, aspect='auto', cmap='RdBu_r', vmin=-bound, vmax=bound)
+                axis.set(title=f'Head {head}: {title}', xlabel='Hop order k',
+                         ylabel='Diagnostic trial row', xticks=range(array.shape[1]))
+                figure.colorbar(artist, ax=axis)
+        writer.save(figure, 'filters/' + slug(name) + '_trial_coefficients',
+                    f'Actual coefficients and bounded adjustments on the selected {partition} trials. '
+                    'Rows follow sample_ids in the accompanying NPZ and diagnostic manifest; these are not causal explanations.')
+    summary = {
+        'schema_version': 2 if any(layer['coefficient_conditioning'] == 'token_contrast' for layer in layers.values()) else 1,
+        'partition': partition, 'sample_ids': sample_ids.tolist(),
+        'labels': labels.tolist(), 'layers': layers,
+        'note': 'Coefficients are recomputed without gradients from each GraphFilter forward input, '
+                'across every diagnostic batch. Deltas are relative to activated checkpoint base coefficients. '
+                'normalized_deltas divide by configured scale; bound_normalized_deltas divide by the attainable '
+                'per-hop bound (equal to scale for trial_power, scale*(taps-1)/taps for token_contrast). '
+                'Saturation means abs(bound_normalized_delta) > 0.95; variation is descriptive only.',
+    }
+    write_json(writer.root / 'coefficient_conditioning.json', summary)
+    return summary
+
+
+def _token_coefficient_heatmaps(writer, name, effective, normalized, partition):
+    """Keep every trial and token visible rather than averaging their routing."""
+    limit = max(float(np.abs(effective).max()), 1e-12)
+    for head in range(effective.shape[1]):
+        figure, axes = writer.plt.subplots(2, effective.shape[-1], squeeze=False,
+                                          figsize=(4 * effective.shape[-1], 7), constrained_layout=True)
+        for hop in range(effective.shape[-1]):
+            for row, array, title in (
+                    (0, effective[:, head, :, hop], 'Effective coefficient'),
+                    (1, normalized[:, head, :, hop], 'Delta / attainable bound')):
+                axis = axes[row, hop]
+                bound = limit if row == 0 else 1.
+                artist = axis.imshow(array, aspect='auto', cmap='RdBu_r', vmin=-bound, vmax=bound)
+                axis.set(title=f'Head {head}, hop {hop}: {title}', xlabel='Destination token index',
+                         ylabel='Diagnostic trial row', xticks=range(array.shape[1]))
+                figure.colorbar(artist, ax=axis)
+        writer.save(figure, f'filters/{slug(name)}_token_coefficients_head_{head}',
+                    f'Actual destination-token coefficients on selected {partition} trials. '
+                    'Columns retain every token; rows follow sample_ids in the accompanying NPZ and manifest. '
+                    'The second row scales adjustments by their attainable bound, not by the larger configured scale.')
+
+
 def filter_figures(writer, model):
     from agfl.attention.agfl.layer import AGFL
+    statistics = {}
     for name, module in model.named_modules():
         if not isinstance(module, AGFL):
             continue
-        coefficients = []
+        conditioning = module.options.get('coefficient_conditioning', 'static')
+        coefficients, heads = [], []
         for head, graph_filter in enumerate(module.filters):
-            alpha = graph_filter.alpha_logits.detach()
-            mode = graph_filter.options['coefficient_activation']
-            if mode == 'softmax':
-                alpha = alpha.softmax(-1)
-            elif mode == 'sigmoid':
-                alpha = alpha.sigmoid()
-            elif mode == 'relu':
-                alpha = alpha.relu()
+            raw_alpha = graph_filter.alpha_logits.detach()
+            alpha = _base_coefficients(graph_filter)
             coefficients.append(alpha.cpu().numpy())
+            builder = module.builders[head]
+            raw_temperature = builder.temperature.detach()
+            temperature_active = builder.scaling == 'temperature'
+            if not temperature_active:
+                clamp_status = 'inactive'
+            elif bool(raw_temperature < .1):
+                clamp_status = 'below_minimum'
+            elif bool(raw_temperature > 5.):
+                clamp_status = 'above_maximum'
+            elif bool(raw_temperature == .1):
+                clamp_status = 'lower_boundary'
+            elif bool(raw_temperature == 5.):
+                clamp_status = 'upper_boundary'
+            else:
+                clamp_status = 'interior'
+            heads.append({
+                'head': head,
+                'coefficients_raw': raw_alpha.cpu().tolist(),
+                'coefficients_effective': alpha.cpu().tolist() if conditioning == 'static' else None,
+                'coefficients_base': alpha.cpu().tolist(),
+                'coefficients_learnable': graph_filter.alpha_logits.requires_grad,
+                'temperature_raw': float(raw_temperature.cpu()),
+                'temperature_effective': float(raw_temperature.clamp(.1, 5.).cpu()) if temperature_active else None,
+                'temperature_active': temperature_active,
+                'temperature_learnable': builder.temperature.requires_grad,
+                'temperature_clamped': clamp_status in {'below_minimum', 'above_maximum'},
+                'temperature_clamp_status': clamp_status,
+                'projections': [],
+            })
             projections = list(graph_filter.W) if graph_filter.projection == 'separate' else ([graph_filter.W] if graph_filter.projection == 'shared' else [])
             if projections:
                 figure, axes = writer.plt.subplots(1, len(projections), figsize=(4 * len(projections), 3.5), squeeze=False, constrained_layout=True)
                 for index, (axis, projection) in enumerate(zip(axes[0], projections)):
                     weights = projection.weight.detach().cpu().numpy()
+                    heads[-1]['projections'].append({
+                        'projection_index': index,
+                        'hop_order': index if graph_filter.projection == 'separate' else None,
+                        'shape': list(weights.shape),
+                        'learnable': projection.weight.requires_grad,
+                        'frobenius_norm': float(np.linalg.norm(weights)),
+                        'distance_from_identity': float(np.linalg.norm(
+                            weights - np.eye(*weights.shape, dtype=weights.dtype))),
+                    })
                     limit = max(float(np.abs(weights).max()), 1e-12)
                     artist = axis.imshow(weights, cmap='RdBu_r', vmin=-limit, vmax=limit)
                     axis.set(title=f'Head {head}, projection {index}', xlabel='Input feature', ylabel='Output feature')
@@ -240,9 +548,50 @@ def filter_figures(writer, model):
         for head, alpha in enumerate(coefficients):
             axis.plot(range(len(alpha)), alpha, marker='o', label=f'Head {head}')
         axis.axhline(0, color='black', linewidth=.7)
-        axis.set(xlabel='Hop order k', ylabel='Effective coefficient', title=name)
+        axis.set(xlabel='Hop order k', ylabel='Effective coefficient' if conditioning == 'static' else 'Base coefficient', title=name)
         axis.legend()
-        writer.save(figure, 'filters/' + slug(name) + '_coefficients', 'Learned AGFL coefficients after the configured coefficient activation.')
+        caption = 'Learned AGFL coefficients after the configured coefficient activation.'
+        if conditioning != 'static':
+            caption = ('Learned AGFL base coefficients before trial-dependent adjustments. '
+                       'Actual per-trial coefficients are saved in coefficient_conditioning.json and its NPZ arrays.')
+        if conditioning == 'token_contrast':
+            caption = ('Learned AGFL base coefficients before destination-token adjustments. '
+                       'Actual coefficients for every trial and token are saved in coefficient_conditioning.json '
+                       'and its NPZ arrays; these base values alone do not describe the routed filter.')
+        writer.save(figure, 'filters/' + slug(name) + '_coefficients', caption)
+        temperature_init = float(module.options.get('temperature_init', 1.0))
+        temperature_active = module.options['score_scaling'] == 'temperature'
+        statistics[name] = {
+            'coefficient_init': module.options['coefficient_init'],
+            'coefficient_activation': module.options['coefficient_activation'],
+            'coefficient_conditioning': conditioning,
+            'coefficient_conditioning_scale': float(module.options.get('coefficient_conditioning_scale', .5)) if conditioning != 'static' else None,
+            'coefficient_scope': ('sample_independent' if conditioning == 'static' else
+                                  'base_before_token_adjustment' if conditioning == 'token_contrast' else
+                                  'base_before_trial_adjustment'),
+            'agfl_variant': module.options['agfl_variant'],
+            'filter_projection': module.options['filter_projection'],
+            'filter_projection_init': module.options.get('filter_projection_init', 'pytorch'),
+            'score_scaling': module.options['score_scaling'],
+            'temperature_init': temperature_init,
+            'temperature_active': temperature_active,
+            'temperature_clamp_bounds': [.1, 5.] if temperature_active else None,
+            'heads': heads,
+            'note': 'Learned values are read from the loaded checkpoint; initialization settings come from the saved configuration. Inactive temperatures do not scale scores; their effective value is null. Clamp status distinguishes exact boundaries from values outside the interval.',
+        }
+        if temperature_active:
+            figure, axis = writer.plt.subplots(figsize=(7, 4), constrained_layout=True)
+            indices = [head['head'] for head in heads]
+            axis.plot(indices, [head['temperature_raw'] for head in heads], marker='o', label='Checkpoint parameter')
+            axis.plot(indices, [head['temperature_effective'] for head in heads], marker='x', label='Effective after clamp')
+            axis.axhline(temperature_init, color='black', linestyle=':', linewidth=1., label='Configured initialization')
+            axis.set(xticks=indices, xlabel='Head', ylabel='Temperature', title=name)
+            axis.legend()
+            writer.save(figure, 'filters/' + slug(name) + '_temperature',
+                        'Per-head score temperatures from the loaded checkpoint. Effective values are clamped to [0.1, 5]. With softmax normalization, lower values sharpen probabilities at fixed scores.')
+    if statistics:
+        write_json(writer.root / 'filter_statistics.json', statistics)
+    return statistics
 
 
 def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', max_samples=256,
@@ -329,8 +678,12 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
                 topomap(writer, pattern, info, f'signals/csp_{component}', f'CSP pattern {component}, fitted on training examples only')
         except (ValueError, np.linalg.LinAlgError) as error:
             writer.skip('signals/csp', error)
-    filter_figures(writer, model)
-    features, probabilities, maps, hooks = [], [], {}, []
+    filter_statistics = filter_figures(writer, model)
+    coefficient_capture = TrialCoefficientCapture(model)
+    from .temporal_statistics import TemporalStatisticsCapture, temporal_statistics_figures
+    temporal_capture = TemporalStatisticsCapture(model)
+    sample_ids = [bundle.sample_ids[i] for i in indices]
+    features, probabilities, maps, hooks = [], [], {}, [*coefficient_capture.hooks, *temporal_capture.hooks]
     readout = model.feature_readout if hasattr(model, 'feature_readout') else model.classifier
     hooks.append(readout.register_forward_pre_hook(
         lambda module, args: features.append(args[0].detach().flatten(1).cpu().numpy())))
@@ -365,11 +718,18 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
     try:
         with torch.no_grad():
             for start in range(0, len(values), 16):
+                coefficient_capture.start_batch(sample_ids[start:start+16])
+                temporal_capture.start_batch(sample_ids[start:start+16])
                 logits = model(torch.from_numpy(values[start:start+16]).to(device))
                 probabilities.append(logits.softmax(-1).cpu().numpy())
     finally:
         for hook in hooks:
             hook.remove()
+    conditioning_statistics = coefficient_conditioning_figures(
+        writer, coefficient_capture, sample_ids, labels, partition)
+    temporal_statistics = temporal_statistics_figures(
+        writer, temporal_capture, sample_ids, labels,
+        bundle.metadata.get('label_names') or [f'Class {i}' for i in range(bundle.metadata['num_classes'])], partition)
     embedding_figure(writer, np.concatenate(features), labels, embedding, config['seeds'][0])
     statistics = {name: graph_figures(writer, name, state, bundle.metadata, info, values[0]) for name, state in maps.items()}
     write_json(writer.root / 'mixer_statistics.json', statistics)
@@ -395,10 +755,14 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
         'experiment_id': experiment_identity(config), 'comparison_id': comparison_identity(config),
         'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
         'checkpoint': source_fingerprint(checkpoint_path), 'partition': partition, 'max_samples': max_samples,
-        'sample_ids': [bundle.sample_ids[i] for i in indices], 'labels': labels.tolist(),
+        'sample_ids': sample_ids, 'labels': labels.tolist(),
         'csp_training_sample_ids': [bundle.sample_ids[i] for i in csp_indices],
         'sampling': 'Class-balanced diagnostic subset; not the full evaluation cohort',
         'prediction_check': prediction_check,
+        'filter_statistics_file': 'filter_statistics.json' if filter_statistics else None,
+        'coefficient_conditioning_file': 'coefficient_conditioning.json' if conditioning_statistics else None,
+        'temporal_statistics_file': 'temporal_statistics.json' if temporal_statistics else None,
+        'checkpoint_policy': checkpoint.get('checkpoint_policy', {'weights': 'raw'}),
         'normalization': config['data'].get('normalization'), 'device': device, 'embedding': embedding,
         'training_provenance': saved_provenance, 'diagnostic_provenance': current,
         'source_matches_training': current['source_sha256'] == saved_provenance.get('source_sha256'),

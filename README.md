@@ -109,9 +109,22 @@ root/
   mit-bih-arrhythmia-database-1.0.0/     recordings and annotations
 ```
 
-Use Python 3.12+ and a suitable PyTorch/CUDA environment. If installation is
-needed there: `python -m pip install -e '.[dev,plots]'`. Dependencies are defined
-in `pyproject.toml`; preserve a target-compatible lock and the installed versions.
+Use the existing Python 3.12+ PyTorch/CUDA environment. `pytest` is an optional
+development dependency, not a requirement for training or plotting. Dependencies
+are defined in `pyproject.toml`; keep the installed environment stable.
+
+Request an interactive allocation and open a shell on the allocated GPU node:
+
+```bash
+salloc -p gpu --gpus=1 --mem=10G -N 1 -n 1 -c 4 --time=04:00:00 \
+  srun --pty bash -l
+```
+
+Wait until the allocation is granted before continuing. The current
+[A03 EEGNet token-routing comparison](docs/eegnet_agfl_token_routing.md) runs training,
+checkpoint diagnostics and result plots with one command. Separate plotting
+commands are also provided for recovery. No `.sbatch` file or development
+test run is required.
 
 Activate your existing environment in each new cluster shell. For the environment
 at `~/.venv` used in earlier runs:
@@ -179,31 +192,134 @@ labels are never inferred. ECG selects MLII by name and records missing leads.
 
 ## Improve EEGNet + AGFL on BCI IV 2a
 
-**Current priority: improve AGFL on A03.** The nine-subject expansion is
-deferred. The new opt-in Q/K/V candidates test learned graph projections,
-a one-hop initialization that makes the dense polynomial candidate start
-with the MHA computation, and sparse/norm-preserving propagation. The EEGNet
-backbone, data and training recipe remain fixed. See the
-[A03 AGFL improvement workflow](docs/eegnet_agfl_qkv_improvement.md) for
-the cluster checks, 15-fit validation-only search, and separate commands
-for checkpoint plots and result plots. The MHA baseline remains fixed;
-no improvement is claimed before measuring it.
+**Current priority: restore the previous EEGNet and improve AGFL only.**
+The failed power/EMA recipe is withdrawn from the active comparison. EEGNet
+again uses its original convolution path, 32-sample temporal kernel and seven
+time tokens; training again uses learning rate 0.005, focal gamma 3, no
+augmentation, no EMA and the original checkpoint tie rule. Preprocessing is
+unchanged. The new AGFL option learns a token-specific mixture of existing
+graph hops from each token and its neighborhood contrast. The
+[token-routing workflow](docs/eegnet_agfl_token_routing.md) documents the exact
+formula, rollback, comparison and commands. No dependencies are added.
+
+From the cluster `AGFL` directory, with the existing environment and GPU
+allocation active and `../ml/A03T.gdf` available, launch everything once:
+
+```bash
+python main.py sweep --preset eegnet-a03-token-agfl \
+  --output-dir results/eegnet-A03-token-agfl-v1 \
+  --report
+```
+
+This is **one command, 20 fits**: static sparse AGFL, token-routed sparse AGFL,
+MHA and Linformer rank 4, each on A03 with seeds 0–4 and 250 epochs. The two
+AGFL arms differ only in coefficient routing; its 192 new parameters start
+with zero correction. Every method shares the restored EEGNet, training,
+preprocessing and per-seed splits. Validation accuracy selects one checkpoint
+per method; every selected checkpoint receives test results. The report
+compares token-routed AGFL with static AGFL and both attention baselines and
+records each class's recall, so feet gains cannot hide tongue/hand losses.
+
+`--report` is reusable with **`run`, `sweep` and `tune-eegnet`**. It generates
+validation checkpoint diagnostics with t-SNE, then runs result analysis with
+plots. It uses each session's first configured training device (and announces
+that choice for a mixed-device session). It does nothing with `--dry-run`.
+Without `--report`, the existing separate plotting workflow remains available.
+For `run` and `sweep`, add `--skip-completed` when resuming; provenance and
+settings must match for completed runs to be reused. `tune-eegnet`
+already reuses matching completed candidates by default. Incomplete fits
+restart from epoch 1. Keep the source, configuration and environment stable
+throughout the study, and use the fresh output directory above.
+
+If automatic reporting is interrupted, completed training is retained. Recover
+checkpoint plots without retraining:
+
+```bash
+python main.py diagnose-session results/eegnet-A03-token-agfl-v1 \
+  --device cuda --partition validation --embedding tsne
+```
+
+Then refresh result plots and tables:
+
+```bash
+python main.py analyze results/eegnet-A03-token-agfl-v1 --plots
+```
+
+Download **`results/eegnet-A03-token-agfl-v1/report/`** into a new local folder. Open
+`analysis/report.md` for accuracy summaries, `analysis/figures/index.md` for
+result plots, and each run's `index.md` below `diagnostics/` for checkpoint
+plots. `analysis/per_class.csv` and `analysis/per_class_summary.csv` give
+validation/test class metrics; figures include class recall histories and
+comparisons. Token-routed runs save `coefficient_conditioning.json` and
+per-trial/head/token/hop coefficient arrays and heatmaps under `filters/`.
+These expose routing variation, bounded corrections and the zero-sum
+constraint. Keep `artifacts/` on the cluster for diagnostic regeneration.
+There is no candidate-selection report in this fixed comparison. New accuracy
+gains remain unmeasured; **90% is a target**. A03 has been repeatedly inspected,
+so this remains development evidence.
+
+**Retired A03 power/EMA comparison:** AGFL averaged **77.04%**, MHA **76.30%**
+and Linformer rank 4 **76.67%**, below their prior original-EEGNet results.
+All 15 fits and 346 figure pairs completed; the power branch and EMA were
+active. The [power/EMA record](docs/eegnet_power_ema.md) preserves unfavorable
+results and reproduction commands. Its isolated reproduction classes keep
+old checkpoints inspectable; the active EEGNet has no power branch.
+
+**Completed A03 conditioning comparison:** original and conditioned AGFL
+both averaged **84.44%** test accuracy, versus **85.93%** for Linformer rank 4.
+Conditioning improved feet but reduced tongue recall; its controller was
+active and numerically finite. All 15 fits and 313 figure pairs completed.
+The [conditioning workflow](docs/eegnet_agfl_conditioning.md) preserves the
+implementation and reproduction commands. Static AGFL remains the reference.
+
+**Completed A03 capacity study:** the validation-selected procedure reached
+**84.44%** mean test accuracy (seed SD **3.10 percentage points**). The
+15-token/projected variants did not beat the seven-token sparse control's
+mean validation accuracy. The [single-file results review](docs/eegnet_a03_capacity_review.html)
+records the evidence; the [capacity workflow](docs/eegnet_agfl_capacity.md)
+preserves reproduction commands. It is no longer the next launch.
+
+**Completed A03 graph/filter refinement:** validation-selected test accuracy
+is **85.56%** (seed SD **2.03 percentage points**). The new temperature and
+coefficient initializations did not beat the sparse control's mean validation
+accuracy as fixed candidates. The [refinement workflow](docs/eegnet_agfl_refinement.md)
+preserves that experiment's settings and reproduction commands.
+
+**Completed A03 all-attention comparison:** fixed sparse AGFL averages
+**84.44%** test accuracy, MHA **85.56%**, Performer **84.44%**, Linformer
+rank 4/7 **85.93%/79.63%**, and Nyström landmarks 4/7 **51.48%/85.19%**.
+AGFL has the highest mean ROC-AUC (**0.9721**), but no accuracy advantage.
+All 35 runs and 691 PNG/PDF figure pairs completed. These fixed-setting results
+differ from the earlier validation-selected searches. The
+[all-attention workflow](docs/eegnet_a03_all_attentions.md) preserves that
+experiment's settings and reproduction commands.
+
+**Completed A03 sparsity check:** selecting between three-neighbor and
+five-neighbor Q/K/V AGFL again gave **85.56% mean test accuracy**, with
+**5.77 percentage points** seed SD. Top-three did not improve validation
+accuracy in any seed: four ties and one loss. The earlier three-candidate
+Q/K/V search also averaged 85.56%, equal to the historical MHA mean. These
+search results do not establish an AGFL advantage. The
+[Q/K/V and sparsity workflow](docs/eegnet_agfl_qkv_improvement.md) preserves
+the earlier experiment commands; they are not the next launch.
 
 The same improved AGFL module is available inside **all five backbones**.
 See [cross-model improvements and cluster checks](docs/agfl_cross_model_improvements.md)
 for the shared attention settings, backbone-specific heads/hop orders,
 whole-model initialization checks, and additional numerical safeguards.
-Keep the current A03 search bounded before extending it to other backbones.
+Coefficient-routing options live inside AGFL, independently of model choice.
+Current work remains on the restored EEGNet at the user's request.
 
 **Manuscript reference and comparison scope:** use the latest located
 `Downloads/NEU_art_submission.pdf` (4 May 2026), rather than the local TeX
-draft. The current EEGNet comparison is **MHA versus AGFL**, with four
-classes and separate subject training. The initial A03 attention pilot is
-complete; improving AGFL is now the priority. A06 remains part of the later
-full evaluation. See
+draft. The completed EEGNet comparison included **MHA, AGFL, Performer,
+Linformer and Nystromformer**, with four classes and separate subject
+training. The A03 five-attention comparison is complete; the next experiment
+compares static/token-routed AGFL, MHA and Linformer inside the restored
+EEGNet. See
 [the PDF reference and pilot rationale](docs/neurips_submission_reference.md).
 
-**Latest A03 attention comparison:** MHA averages **85.56% test accuracy**,
+**Earlier fixed A03 attention comparison:** MHA averages **85.56% test accuracy**,
 AGFL **84.81%**, over five matched seeds. AGFL wins three seeds, ties one and
 loses one, for a mean difference of **−0.74 percentage points**. AGFL uses
 29.67% fewer parameters, but its saved run times are about 1.85 times longer
@@ -360,8 +476,6 @@ Run these commands **on the cluster, from `AGFL`**, with `A01T.gdf` through
 
 ```bash
 source ~/.venv/bin/activate
-python -m pip install -e '.[dev,plots]'
-python -m pytest tests/test_eegnet_bci2a.py tests/test_engine.py tests/test_models.py tests/test_presets.py
 python main.py tune-eegnet --data-dir ../ml --subjects 1 --seeds 0 \
   --candidate compact_trialnorm --epochs 2 --output-dir results/eegnet-bci2a-smoke
 ```
@@ -426,7 +540,12 @@ session argument to both plotting commands.
 
 ## Compare attention within one model
 
-### A03 EEGNet: MHA versus AGFL
+### Earlier A03 EEGNet pilot: MHA versus AGFL
+
+These commands preserve the completed two-attention pilot. The completed
+[A03 all-attention workflow](docs/eegnet_a03_all_attentions.md) records the
+five-method comparison; the current launch is the
+[EEGNet token-routing comparison](docs/eegnet_agfl_token_routing.md).
 
 After updating the cluster checkout, run from `AGFL` with the Python
 environment active and `../ml/A03T.gdf` available. The
@@ -467,7 +586,7 @@ python main.py analyze results/eegnet-A03-attention --plots
 Download only **`results/eegnet-A03-attention/report/`**. Within that folder,
 the main result-plot index is `analysis/figures/index.md`; each directory below
 `diagnostics` has its own `index.md`. `analysis/attention_comparison.csv`
-contains per-seed attention metrics, `analysis/statistical_comparisons.csv`
+contains attention summaries across seeds, `analysis/statistical_comparisons.csv`
 contains paired AGFL-minus-MHA differences, and `analysis/report.md`
 summarizes the results. Both methods' results remain in the report; this
 is an attention comparison, not validation selection of one winning method.
@@ -478,7 +597,7 @@ it does not claim to reproduce every setting described in the historical PDF.
 ### Deferred: extend the fixed attention comparison to all nine subjects
 
 **Do not launch this as the next experiment.** First complete the
-[A03 AGFL improvement workflow](docs/eegnet_agfl_qkv_improvement.md).
+[A03 EEGNet token-routing comparison](docs/eegnet_agfl_token_routing.md).
 The commands below preserve the earlier fixed-comparison expansion for
 reference; a later study must use the chosen AGFL method or selection procedure.
 
@@ -763,7 +882,8 @@ requires a fresh v2 configuration. Keep a running study's checkout stable.
 
 ## Verification and extension
 
-Target-only checks:
+Optional developer checks on the target machine, for environments that already
+have `pytest`. These are separate from the training and plotting workflow:
 
 ```bash
 python -m pytest -m 'not real_data'

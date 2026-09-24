@@ -6,7 +6,7 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 def classification_metrics(targets, probabilities):
     targets = np.asarray(targets, dtype=np.int64)
     probabilities = np.asarray(probabilities, dtype=np.float64)
-    if probabilities.ndim != 2 or len(targets) != len(probabilities) or not len(targets):
+    if targets.ndim != 1 or probabilities.ndim != 2 or len(targets) != len(probabilities) or not len(targets):
         raise ValueError("Expected nonempty labels and [samples, classes] probabilities")
     if not np.isfinite(probabilities).all():
         raise ValueError("Predicted probabilities are nonfinite")
@@ -15,11 +15,26 @@ def classification_metrics(targets, probabilities):
     if (probabilities < 0).any() or not np.allclose(probabilities.sum(-1), 1, atol=1e-5):
         raise ValueError('Metrics require normalized class probabilities')
     classes = np.arange(probabilities.shape[1])
+    predicted = probabilities.argmax(axis=1)
+    confusion = np.zeros((len(classes), len(classes)), dtype=np.int64)
+    np.add.at(confusion, (targets, predicted), 1)
+    per_class = []
+    for index in classes:
+        correct = int(confusion[index, index])
+        support, predicted_count = int(confusion[index].sum()), int(confusion[:, index].sum())
+        per_class.append({
+            'class_id': int(index), 'support': support, 'predicted_count': predicted_count,
+            'true_positive': correct,
+            'recall': correct / support if support else None,
+            'precision': correct / predicted_count if predicted_count else None,
+            'f1': 2 * correct / (support + predicted_count) if support + predicted_count else 0.,
+        })
     result = {
-        "accuracy": float(accuracy_score(targets, probabilities.argmax(axis=1))),
-        "f1": float(f1_score(targets, probabilities.argmax(axis=1), labels=classes, average="macro", zero_division=0)),
+        "accuracy": float(accuracy_score(targets, predicted)),
+        "f1": float(f1_score(targets, predicted, labels=classes, average="macro", zero_division=0)),
         "roc_auc": None, "roc_auc_reason": None, "n_samples": len(targets),
         "class_counts": np.bincount(targets, minlength=len(classes)).tolist(),
+        'confusion_matrix': confusion.tolist(), 'per_class': per_class,
     }
     if len(np.unique(targets)) != len(classes):
         result["roc_auc_reason"] = "Held-out partition does not contain every class"

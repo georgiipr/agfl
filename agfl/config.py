@@ -14,6 +14,7 @@ TRAINING_DEFAULTS = {
     "weight_decay": 1e-3, "momentum": 0.9, "loss": "focal",
     "class_weights": "balanced", "focal_gamma": 2.0, "scheduler": "warmup_cosine",
     "warmup_epochs": 10, "min_lr_ratio": 0.0, "checkpoint_criterion": "accuracy",
+    "checkpoint_tiebreaker": "none", "ema_decay": 0.0,
     "gradient_clip": None, "num_workers": 0, "amp": False,
     "early_stopping_patience": 0, "early_stopping_min_epochs": 0,
     "augmentation": {"shift": 0, "scale": 0.0, "noise": 0.0,
@@ -135,6 +136,9 @@ def resolve_config(config):
     for key in ('learning_rate', 'weight_decay', 'focal_gamma', 'momentum', 'min_lr_ratio'):
         if not isinstance(t[key], (int, float)) or not math.isfinite(t[key]):
             raise ValueError(f'training.{key} must be finite')
+    if (type(t['ema_decay']) not in (int, float) or not math.isfinite(t['ema_decay'])
+            or not 0 <= t['ema_decay'] < 1):
+        raise ValueError('training.ema_decay must be finite in [0, 1); zero disables EMA')
     for key in ("epochs", "batch_size"):
         if type(t[key]) is not int or t[key] < 1:
             raise ValueError(f"training.{key} must be a positive integer")
@@ -145,9 +149,12 @@ def resolve_config(config):
         "loss": {"cross_entropy", "focal"}, "class_weights": {"balanced", "none"},
         "scheduler": {"none", "cosine", "warmup_cosine", "plateau"},
         "checkpoint_criterion": {"loss", "accuracy", "f1", "roc_auc"},
+        "checkpoint_tiebreaker": {"none", "f1_loss"},
     }.items():
         if t[key] not in choices:
             raise ValueError(f"training.{key} must be one of {sorted(choices)}")
+    if t['checkpoint_tiebreaker'] != 'none' and t['checkpoint_criterion'] != 'accuracy':
+        raise ValueError('checkpoint_tiebreaker=f1_loss requires checkpoint_criterion=accuracy')
     if t["focal_gamma"] < 0 or (t["gradient_clip"] is not None and
             (not math.isfinite(t['gradient_clip']) or t["gradient_clip"] <= 0)):
         raise ValueError("Invalid focal_gamma or gradient_clip")

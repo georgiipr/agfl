@@ -65,6 +65,65 @@ CANDIDATES['spatial_qkv_renorm'] = merge(
     CANDIDATES['spatial_qkv_sparse'],
     {'attention_options': {'agfl_variant': 'renormalized', 'hop_normalization': 'feature'}},
 )
+# A03 follow-up: isolate a three-neighbor cutoff against the existing scheduled
+# cutoff (five of seven time tokens here). Preserve the same tie policy, QKV,
+# filter order, initialization, backbone and training settings in both arms.
+CANDIDATES['spatial_qkv_top3'] = merge(
+    CANDIDATES['spatial_qkv_sparse'],
+    {'attention_options': {'top_k': 3}},
+)
+# A03 refinement: a 2x2 comparison of learned temperature initialization and
+# filter-tap initialization. Keep spatial_qkv_sparse as the separate fixed-scale
+# control: a learnable temperature initialized to 1 is a new training choice.
+CANDIDATES['spatial_qkv_temp1'] = merge(
+    CANDIDATES['spatial_qkv_sparse'],
+    {'attention_options': {'score_scaling': 'temperature', 'temperature_init': 1.}},
+)
+CANDIDATES['spatial_qkv_temp05'] = merge(
+    CANDIDATES['spatial_qkv_temp1'],
+    {'attention_options': {'temperature_init': .5}},
+)
+CANDIDATES['spatial_qkv_identity_temp1'] = merge(
+    CANDIDATES['spatial_qkv_temp1'],
+    {'attention_options': {'coefficient_init': 'identity_one_hop'}},
+)
+CANDIDATES['spatial_qkv_identity_temp05'] = merge(
+    CANDIDATES['spatial_qkv_temp05'],
+    {'attention_options': {'coefficient_init': 'identity_one_hop'}},
+)
+
+# Capacity study: retain 15 time tokens (1000 // 8 // 8), with trainable
+# per-hop feature maps initialized to identity. Cross the two losses with
+# two learning rates without changing data, splits, or the epoch budget.
+# This is a joint architecture/training study, not an isolated pooling or
+# projection ablation. The unchanged control comes first for exact ties.
+CANDIDATES['spatial_qkv_capacity_focal_005'] = merge(
+    CANDIDATES['spatial_qkv_sparse'],
+    {'model_options': {'pk2': 8},
+     'attention_options': {'filter_projection': 'separate',
+                           'filter_projection_init': 'identity'}},
+)
+CANDIDATES['spatial_qkv_capacity_focal_001'] = merge(
+    CANDIDATES['spatial_qkv_capacity_focal_005'],
+    {'training': {'learning_rate': .001}},
+)
+CANDIDATES['spatial_qkv_capacity_ce_005'] = merge(
+    CANDIDATES['spatial_qkv_capacity_focal_005'],
+    {'training': {'loss': 'cross_entropy'}},
+)
+CANDIDATES['spatial_qkv_capacity_ce_001'] = merge(
+    CANDIDATES['spatial_qkv_capacity_ce_005'],
+    {'training': {'learning_rate': .001}},
+)
+CANDIDATE_SETS = {
+    'capacity': (
+        'spatial_qkv_sparse',
+        'spatial_qkv_capacity_focal_005',
+        'spatial_qkv_capacity_focal_001',
+        'spatial_qkv_capacity_ce_005',
+        'spatial_qkv_capacity_ce_001',
+    ),
+}
 
 
 def search_configs(data_dir, output_dir, subjects, seeds, candidates=None, epochs=None):
