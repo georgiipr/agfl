@@ -1,0 +1,672 @@
+{
+  "base": {
+    "dataset": "eeg",
+    "device": "cuda",
+    "deterministic": true,
+    "threads": 1,
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "data": {
+      "data_dir": "../ml",
+      "subjects": [
+        3,
+        4,
+        9
+      ],
+      "sessions": [
+        "T"
+      ],
+      "normalization": "train_channel",
+      "filter_scope": "trial",
+      "lowcut": 2.0,
+      "highcut": 30.0,
+      "offset_seconds": 0.0,
+      "window": 1000,
+      "artifact_policy": "exclude"
+    },
+    "split": {
+      "protocol": "stratified",
+      "train": 0.6,
+      "validation": 0.2,
+      "test": 0.2
+    },
+    "training": {
+      "epochs": 250,
+      "batch_size": 64,
+      "optimizer": "adamw",
+      "learning_rate": 0.005,
+      "weight_decay": 0.001,
+      "momentum": 0.9,
+      "loss": "focal",
+      "class_weights": "balanced",
+      "focal_gamma": 3.0,
+      "checkpoint_criterion": "accuracy",
+      "scheduler": "warmup_cosine",
+      "warmup_epochs": 10,
+      "min_lr_ratio": 0.0,
+      "gradient_clip": null,
+      "early_stopping_patience": 0,
+      "early_stopping_min_epochs": 100,
+      "amp": false,
+      "num_workers": 0,
+      "augmentation": {
+        "shift": 0,
+        "scale": 0.0,
+        "noise": 0.0,
+        "recombine_segments": 0,
+        "recombine_probability": 0.5
+      },
+      "ema_decay": 0.0,
+      "checkpoint_tiebreaker": "none",
+      "save_checkpoints": false
+    },
+    "output_dir": "results/eeg-A03-A04-A09-spatial-accuracy-v1"
+  },
+  "experiments": [
+    {
+      "study_arm": "agfl_base",
+      "attention": "agfl",
+      "attention_options": {
+        "heads": 4,
+        "agfl_variant": "polynomial",
+        "K": 2,
+        "top_k": "scheduled",
+        "top_k_stage": "scores",
+        "top_k_ties": "threshold",
+        "top_k_schedule": {
+          "smax": 0.2,
+          "smin": 0.8,
+          "alpha": 3.0
+        },
+        "graph_normalization": "softmax",
+        "post_topk_renormalize": true,
+        "coefficient_activation": "identity",
+        "coefficient_init": "zeros",
+        "coefficient_conditioning": "static",
+        "coefficient_conditioning_scale": 0.5,
+        "temporal_bias": false,
+        "output_gate": false,
+        "learnable_coefficients": true,
+        "projection": "split_input",
+        "qkv_bias": false,
+        "filter_projection": "separate",
+        "filter_projection_init": "pytorch",
+        "score_scaling": "temperature",
+        "temperature_init": 1.0,
+        "hop_normalization": "feature"
+      },
+      "model": "eegnet",
+      "model_options": {
+        "attention_axis": "electrode",
+        "temp_kernel": 32,
+        "f1": 16,
+        "d": 2,
+        "f2": 32,
+        "pk1": 8,
+        "pk2": 16,
+        "dropout_rate": 0.5,
+        "attention_residual": true,
+        "attention_dropout": 0.0,
+        "batch_norm_momentum": 0.1,
+        "batch_norm_eps": 1e-05,
+        "initialization": "pytorch",
+        "max_norm1": 1.0,
+        "max_norm2": 0.25,
+        "spatial_readout": "learned",
+        "temporal_statistics": "mean",
+        "electrode_dim": 32,
+        "electrode_architecture": "spatial_fusion"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-eegnet",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "mha_base",
+      "attention": "mha",
+      "attention_options": {
+        "heads": 4,
+        "temporal_bias": false,
+        "output_gate": false
+      },
+      "model": "eegnet",
+      "model_options": {
+        "attention_axis": "electrode",
+        "temp_kernel": 32,
+        "f1": 16,
+        "d": 2,
+        "f2": 32,
+        "pk1": 8,
+        "pk2": 16,
+        "dropout_rate": 0.5,
+        "attention_residual": true,
+        "attention_dropout": 0.0,
+        "batch_norm_momentum": 0.1,
+        "batch_norm_eps": 1e-05,
+        "initialization": "pytorch",
+        "max_norm1": 1.0,
+        "max_norm2": 0.25,
+        "spatial_readout": "learned",
+        "temporal_statistics": "mean",
+        "electrode_dim": 32,
+        "electrode_architecture": "spatial_fusion"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-eegnet",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "agfl_base",
+      "attention": "agfl",
+      "attention_options": {
+        "heads": 4,
+        "agfl_variant": "polynomial",
+        "K": 3,
+        "top_k": "scheduled",
+        "top_k_stage": "scores",
+        "top_k_ties": "threshold",
+        "top_k_schedule": {
+          "smax": 0.2,
+          "smin": 0.8,
+          "alpha": 3.0
+        },
+        "graph_normalization": "softmax",
+        "post_topk_renormalize": true,
+        "coefficient_activation": "identity",
+        "coefficient_init": "zeros",
+        "coefficient_conditioning": "static",
+        "coefficient_conditioning_scale": 0.5,
+        "temporal_bias": false,
+        "output_gate": false,
+        "learnable_coefficients": true,
+        "projection": "split_input",
+        "qkv_bias": false,
+        "filter_projection": "separate",
+        "filter_projection_init": "pytorch",
+        "score_scaling": "temperature",
+        "temperature_init": 1.0,
+        "hop_normalization": "feature"
+      },
+      "model": "eegencoder",
+      "model_options": {
+        "eegn_F1": 16,
+        "eegn_D": 2,
+        "eegn_kernelSize": 64,
+        "pool1": 8,
+        "pool2": 7,
+        "tcn_depth": 3,
+        "tcn_kernelSize": 4,
+        "tcn_filters": 32,
+        "dropout": 0.3,
+        "attention_axis": "electrode",
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-eegencoder",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "mha_base",
+      "attention": "mha",
+      "attention_options": {
+        "heads": 4,
+        "temporal_bias": false,
+        "output_gate": false
+      },
+      "model": "eegencoder",
+      "model_options": {
+        "eegn_F1": 16,
+        "eegn_D": 2,
+        "eegn_kernelSize": 64,
+        "pool1": 8,
+        "pool2": 7,
+        "tcn_depth": 3,
+        "tcn_kernelSize": 4,
+        "tcn_filters": 32,
+        "dropout": 0.3,
+        "attention_axis": "electrode",
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-eegencoder",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "agfl_base",
+      "attention": "agfl",
+      "attention_options": {
+        "heads": 2,
+        "agfl_variant": "polynomial",
+        "K": 1,
+        "top_k": "scheduled",
+        "top_k_stage": "scores",
+        "top_k_ties": "threshold",
+        "top_k_schedule": {
+          "smax": 0.2,
+          "smin": 0.8,
+          "alpha": 3.0
+        },
+        "graph_normalization": "softmax",
+        "post_topk_renormalize": true,
+        "coefficient_activation": "identity",
+        "coefficient_init": "zeros",
+        "coefficient_conditioning": "static",
+        "coefficient_conditioning_scale": 0.5,
+        "temporal_bias": false,
+        "output_gate": false,
+        "learnable_coefficients": true,
+        "projection": "split_input",
+        "qkv_bias": false,
+        "filter_projection": "separate",
+        "filter_projection_init": "pytorch",
+        "score_scaling": "temperature",
+        "temperature_init": 1.0,
+        "hop_normalization": "feature"
+      },
+      "model": "dstseegencoder",
+      "model_options": {
+        "dim": 32,
+        "temporal_kernel": 64,
+        "pool1": 7,
+        "pool2": 7,
+        "num_branches": 5,
+        "depth": 4,
+        "mlp_ratio": 4.0,
+        "dropout": 0.3,
+        "attention_axis": "electrode",
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-dstseegencoder",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "mha_base",
+      "attention": "mha",
+      "attention_options": {
+        "heads": 2,
+        "temporal_bias": false,
+        "output_gate": false
+      },
+      "model": "dstseegencoder",
+      "model_options": {
+        "dim": 32,
+        "temporal_kernel": 64,
+        "pool1": 7,
+        "pool2": 7,
+        "num_branches": 5,
+        "depth": 4,
+        "mlp_ratio": 4.0,
+        "dropout": 0.3,
+        "attention_axis": "electrode",
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-dstseegencoder",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "agfl_base",
+      "attention": "agfl",
+      "attention_options": {
+        "heads": 4,
+        "agfl_variant": "polynomial",
+        "K": 2,
+        "top_k": "scheduled",
+        "top_k_stage": "scores",
+        "top_k_ties": "threshold",
+        "top_k_schedule": {
+          "smax": 0.2,
+          "smin": 0.8,
+          "alpha": 3.0
+        },
+        "graph_normalization": "softmax",
+        "post_topk_renormalize": true,
+        "coefficient_activation": "identity",
+        "coefficient_init": "zeros",
+        "coefficient_conditioning": "static",
+        "coefficient_conditioning_scale": 0.5,
+        "temporal_bias": false,
+        "output_gate": false,
+        "learnable_coefficients": true,
+        "projection": "split_input",
+        "qkv_bias": false,
+        "filter_projection": "separate",
+        "filter_projection_init": "pytorch",
+        "score_scaling": "temperature",
+        "temperature_init": 1.0,
+        "hop_normalization": "feature"
+      },
+      "model": "conformer",
+      "model_options": {
+        "dim": 64,
+        "depth": 3,
+        "dropout": 0.3,
+        "expansion": 4,
+        "temporal_kernel": 15,
+        "temporal_bins": 8,
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-conformer",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "mha_base",
+      "attention": "mha",
+      "attention_options": {
+        "heads": 4,
+        "temporal_bias": false,
+        "output_gate": false
+      },
+      "model": "conformer",
+      "model_options": {
+        "dim": 64,
+        "depth": 3,
+        "dropout": 0.3,
+        "expansion": 4,
+        "temporal_kernel": 15,
+        "temporal_bins": 8,
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-conformer",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "agfl_base",
+      "attention": "agfl",
+      "attention_options": {
+        "heads": 4,
+        "agfl_variant": "polynomial",
+        "K": 2,
+        "top_k": "scheduled",
+        "top_k_stage": "scores",
+        "top_k_ties": "threshold",
+        "top_k_schedule": {
+          "smax": 0.2,
+          "smin": 0.8,
+          "alpha": 3.0
+        },
+        "graph_normalization": "softmax",
+        "post_topk_renormalize": true,
+        "coefficient_activation": "identity",
+        "coefficient_init": "zeros",
+        "coefficient_conditioning": "static",
+        "coefficient_conditioning_scale": 0.5,
+        "temporal_bias": false,
+        "output_gate": false,
+        "learnable_coefficients": true,
+        "projection": "split_input",
+        "qkv_bias": false,
+        "filter_projection": "separate",
+        "filter_projection_init": "pytorch",
+        "score_scaling": "temperature",
+        "temperature_init": 1.0,
+        "hop_normalization": "feature"
+      },
+      "model": "signal_transformer",
+      "model_options": {
+        "dim": 64,
+        "depth": 2,
+        "dropout": 0.1,
+        "mlp_ratio": 4.0,
+        "eeg_temporal_bins": 8,
+        "eeg_kernel_size": 15,
+        "ecg_patch_size": 16,
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-signal_transformer",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    },
+    {
+      "study_arm": "mha_base",
+      "attention": "mha",
+      "attention_options": {
+        "heads": 4,
+        "temporal_bias": false,
+        "output_gate": false
+      },
+      "model": "signal_transformer",
+      "model_options": {
+        "dim": 64,
+        "depth": 2,
+        "dropout": 0.1,
+        "mlp_ratio": 4.0,
+        "eeg_temporal_bins": 8,
+        "eeg_kernel_size": 15,
+        "ecg_patch_size": 16,
+        "spatial_readout": "learned"
+      },
+      "study": {
+        "name": "eeg-A03-A04-A09-spatial-accuracy-v1-signal_transformer",
+        "subjects": [
+          "A03",
+          "A04",
+          "A09"
+        ],
+        "seeds": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "arms": [
+          "agfl_base",
+          "mha_base"
+        ],
+        "comparisons": [
+          [
+            "agfl_base",
+            "mha_base"
+          ]
+        ]
+      }
+    }
+  ]
+}

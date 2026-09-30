@@ -152,18 +152,29 @@ def graph_figures(writer, name, state, metadata, info, first_input):
     first = state['first']
     graph_dir = writer.root / 'mixers'
     graph_dir.mkdir(exist_ok=True)
-    np.savez_compressed(graph_dir / (slug(name) + '.npz'), mean=mean, first=first)
+    electrode = state['token_axis'] == 'electrode'
+    node_labels = (metadata.get('channel_names') or [f'Electrode {i + 1}' for i in range(metadata['channels'])]) if electrode else [str(i) for i in range(mean.shape[-1])]
+    class_means = {int(label): total / state['class_counts'][label]
+                   for label, total in state.get('class_sums', {}).items()}
+    class_labels = sorted(class_means)
+    np.savez_compressed(graph_dir / (slug(name) + '.npz'), mean=mean, first=first,
+                        token_axis=state['token_axis'], node_labels=np.asarray(node_labels),
+                        class_labels=np.asarray(class_labels, dtype=int),
+                        class_means=np.stack([class_means[c] for c in class_labels]) if class_labels else np.empty((0, *mean.shape)))
     stats = {'sparsity_per_head': (state['sparsity'] / state['count']).tolist(),
              'entropy_per_head': [float(value / state['count']) if valid else None
                                   for value, valid in zip(state['entropy'], state['entropy_valid'])],
              'kind': state['kind'], 'token_axis': state['token_axis'],
+             'num_tokens': mean.shape[-1], 'node_labels': node_labels,
              'samples': state['count'], 'zero_tolerance': 1e-8}
     heads = mean.shape[0]
     figure, axes = writer.plt.subplots(1, heads, figsize=(4 * heads, 4), squeeze=False, constrained_layout=True)
     tokens = mean.shape[-1]
-    electrode = state['token_axis'] == 'electrode'
     axis_name = 'electrode' if electrode else 'time token'
-    labels = metadata.get('channel_names') if electrode else None
+    labels = node_labels if electrode else None
+    if electrode:
+        from .electrodes import electrode_graph_figures
+        electrode_graph_figures(writer, name, mean, class_means, state.get('class_counts', {}), metadata, info)
     for head, axis in enumerate(axes[0]):
         matrix = mean[head]
         signed = (matrix < 0).any()
@@ -195,6 +206,9 @@ def graph_figures(writer, name, state, metadata, info, first_input):
         axis.plot(range(tokens), incoming, marker='.')
         axis.set(xlabel='Source ' + axis_name + ' index',
                  ylabel='Mean source weight', title=name)
+        if electrode:
+            axis.set(xlabel='Source electrode', xticks=range(tokens), xticklabels=node_labels)
+            axis.tick_params(axis='x', rotation=90, labelsize=6)
         writer.save(figure, 'mixers/' + slug(name) + '_source_weights', 'Mean source-token weights over selected examples; not a saliency estimate.')
     if metadata['modality'] == 'ecg':
         fs = metadata.get('sampling_rate')
@@ -250,6 +264,7 @@ class TrialCoefficientCapture:
     def _capture(self, name, head):
         def hook(graph_filter, args, output):
             import torch
+            from agfl.attention.agfl.layer import propagate
             if self.sample_ids is None:
                 raise ValueError('Set diagnostic sample IDs before capturing coefficients')
             # GraphFilter receives (graph, values). Neither the graph nor a
@@ -258,9 +273,10 @@ class TrialCoefficientCapture:
             if len(values) != len(self.sample_ids):
                 raise ValueError('Coefficient diagnostic batch and sample IDs differ')
             with torch.no_grad():
-                token_local = graph_filter.options.get('coefficient_conditioning', 'static') == 'token_contrast'
+                conditioning = graph_filter.options.get('coefficient_conditioning', 'static')
+                feature_local = conditioning == 'feature_contrast'
+                token_local = conditioning in {'token_contrast', 'feature_contrast'}
                 if token_local:
-                    from agfl.attention.agfl.layer import propagate
                     hops = tuple(propagate(args[0].detach(), values, graph_filter.options['K'],
                                            graph_filter.options['agfl_variant'],
                                            graph_filter.options['hop_normalization']))
@@ -278,7 +294,8 @@ class TrialCoefficientCapture:
                         graph_filter.W[hop](value) if graph_filter.projection == 'separate' else graph_filter.W(value)
                         for hop, value in enumerate(hops)
                     ], dim=-2)
-                    terms = projected * effective.to(projected.dtype).unsqueeze(-1)
+                    weights = effective.movedim(-1, -2) if feature_local else effective.unsqueeze(-1)
+                    terms = projected * weights.to(projected.dtype)
                     contribution_norms = torch.linalg.vector_norm(terms, dim=-1)
                     self.layers[name]['hop_diagnostics'][head].append({
                         'propagated_hop_cosines': cosines.cpu().numpy().copy(),
@@ -290,6 +307,8 @@ class TrialCoefficientCapture:
                 coefficients = effective.detach().cpu().numpy().copy()
             expected_shape = ((len(values), values.shape[-2], graph_filter.alpha_logits.numel()) if token_local
                               else (len(values), graph_filter.alpha_logits.numel()))
+            if feature_local:
+                expected_shape = (*values.shape, graph_filter.alpha_logits.numel())
             if coefficients.shape != expected_shape:
                 raise ValueError('Unexpected trial coefficient dimensions')
             if not np.isfinite(coefficients).all():
@@ -299,8 +318,8 @@ class TrialCoefficientCapture:
         return hook
 
 
-def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partition):
-    """Save actual coefficients with explicit trial/head/(token)/hop axes."""
+def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partition, *, metadata=None):
+    """Save coefficients with explicit trial/head/(token)/(feature)/hop axes."""
     if not capture.layers:
         return None
     sample_ids = np.asarray(sample_ids, dtype=str)
@@ -310,7 +329,9 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
     layers = {}
     for name, state in capture.layers.items():
         module = state['module']
-        token_local = module.options.get('coefficient_conditioning', 'static') == 'token_contrast'
+        conditioning = module.options.get('coefficient_conditioning', 'static')
+        feature_local = conditioning == 'feature_contrast'
+        token_local = conditioning in {'token_contrast', 'feature_contrast'}
         per_head = []
         for batches, id_batches in zip(state['coefficients'], state['sample_ids']):
             if not batches or not np.array_equal(np.concatenate(id_batches), sample_ids):
@@ -323,13 +344,18 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
             raise ValueError('Conditioned coefficient diagnostics require a positive finite scale')
         taps = effective.shape[-1]
         base_broadcast = base[None, :, None, :] if token_local else base[None]
+        if feature_local:
+            base_broadcast = base[None, :, None, None, :]
         deltas = effective.astype(np.float64) - base_broadcast.astype(np.float64)
         normalized = deltas / scale
         # Centered tanh adjustments have a tighter attainable bound than the
         # configured scale: scale/2 * (tanh(g) - mean_hops(tanh(g))).
         delta_bound = scale * (taps - 1) / taps if token_local else scale
         bound_normalized = deltas / delta_bound if delta_bound > 0 else np.zeros_like(deltas)
-        tolerance = max(1e-7, float(np.abs(base).max()) * np.finfo(effective.dtype).eps * taps * 8)
+        # NumPy 2 keeps mixed Python/float32 arithmetic in float32. This
+        # tolerance is saved in JSON, so keep both max operands native floats.
+        dtype_epsilon = float(np.finfo(effective.dtype).eps)
+        tolerance = max(1e-7, float(np.abs(base).max()) * dtype_epsilon * taps * 8)
         if not np.isfinite(deltas).all() or np.any(np.abs(deltas) > delta_bound + tolerance):
             raise ValueError('Trial coefficient deltas exceed their configured conditioning bound')
         delta_sum = deltas.sum(axis=-1)
@@ -338,7 +364,10 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
         gates = np.stack([item.coefficient_gate.weight.detach().cpu().numpy() for item in module.filters])
         if not np.isfinite(gates).all():
             raise ValueError('Nonfinite trial-conditioning gate weights')
-        suffix = '_token_coefficients' if token_local else '_trial_coefficients'
+        if feature_local:
+            gates = gates.reshape(effective.shape[1], effective.shape[3], taps, gates.shape[-1])
+        suffix = ('_feature_coefficients' if feature_local else
+                  '_token_coefficients' if token_local else '_trial_coefficients')
         array_path = Path('filters') / (slug(name) + suffix + '.npz')
         (writer.root / array_path).parent.mkdir(parents=True, exist_ok=True)
         arrays = {
@@ -349,9 +378,19 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
             'hop_orders': np.arange(taps),
         }
         if token_local:
+            electrode = getattr(module, 'token_axis', None) == 'electrode'
+            node_labels = ((metadata or {}).get('channel_names') or
+                           [f'Electrode {i + 1}' for i in range(effective.shape[2])]) if electrode else None
+            if node_labels is not None and len(node_labels) != effective.shape[2]:
+                raise ValueError('Coefficient labels must match the attention node count')
             arrays.update(token_indices=np.arange(effective.shape[2]),
+                          token_axis=np.asarray(getattr(module, 'token_axis', 'unspecified')),
+                          node_labels=np.asarray(node_labels or [], dtype=str),
                           within_trial_token_std=effective.std(axis=2),
                           delta_sum_over_hops=delta_sum)
+            if feature_local:
+                arrays.update(feature_indices=np.arange(effective.shape[3]),
+                              within_token_feature_std=effective.std(axis=3))
             hop_batches = state.get('hop_diagnostics', [])
             if hop_batches and all(hop_batches):
                 for key in ('propagated_hop_cosines', 'propagated_hop_cosine_valid', 'hop_contribution_norms'):
@@ -365,7 +404,7 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
         heads = []
         for head in range(effective.shape[1]):
             coefficients, delta = effective[:, head], deltas[:, head]
-            reduction_axes = (0, 1) if token_local else 0
+            reduction_axes = tuple(range(coefficients.ndim - 1))
             heads.append({
                 'head': head,
                 'base_coefficients': base[head].tolist(),
@@ -382,13 +421,27 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
                 'gate_learnable': module.filters[head].coefficient_gate.weight.requires_grad,
             })
             if token_local:
+                # Per-token summaries average features only for the new mode;
+                # exact feature-resolved arrays and summaries remain available.
+                token_coefficients = coefficients.mean(axis=2) if feature_local else coefficients
+                token_std = coefficients.std(axis=1)
+                if feature_local:
+                    token_std = token_std.mean(axis=1)
                 heads[-1].update({
-                    'effective_mean_per_token': coefficients.mean(axis=0).tolist(),
-                    'effective_std_per_token': coefficients.std(axis=0).tolist(),
-                    'within_trial_token_std_mean': coefficients.std(axis=1).mean(axis=0).tolist(),
-                    'within_trial_token_std_max': coefficients.std(axis=1).max(axis=0).tolist(),
+                    'effective_mean_per_token': token_coefficients.mean(axis=0).tolist(),
+                    'effective_std_per_token': token_coefficients.std(axis=0).tolist(),
+                    'within_trial_token_std_mean': token_std.mean(axis=0).tolist(),
+                    'within_trial_token_std_max': coefficients.std(axis=1).max(axis=(0, 1) if feature_local else 0).tolist(),
                     'delta_sum_over_hops_max_absolute': float(np.abs(delta_sum[:, head]).max()),
                 })
+                if feature_local:
+                    heads[-1].update({
+                        'effective_mean_per_token_feature': coefficients.mean(axis=0).tolist(),
+                        'effective_std_per_token_feature': coefficients.std(axis=0).tolist(),
+                        'effective_mean_per_feature': coefficients.mean(axis=(0, 1)).tolist(),
+                        'within_token_feature_std_mean': coefficients.std(axis=2).mean(axis=(0, 1)).tolist(),
+                        'within_token_feature_std_max': coefficients.std(axis=2).max(axis=(0, 1)).tolist(),
+                    })
                 if 'propagated_hop_cosines' in arrays:
                     valid = arrays['propagated_hop_cosine_valid'][:, head]
                     counts = valid.sum(axis=(0, 1))
@@ -401,23 +454,29 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
                         'hop_contribution_norm_mean': arrays['hop_contribution_norms'][:, head].mean(axis=(0, 1)).tolist(),
                     })
         layers[name] = {
-            'coefficient_conditioning': module.options.get('coefficient_conditioning', 'static'),
+            'coefficient_conditioning': conditioning,
             'coefficient_conditioning_scale': scale,
             'samples': len(sample_ids), 'array_file': array_path.as_posix(),
-            'coefficient_array_axes': ['trial', 'head', 'token', 'hop'] if token_local else ['trial', 'head', 'hop'],
+            'coefficient_array_axes': (['trial', 'head', 'token', 'feature', 'hop'] if feature_local else
+                                       ['trial', 'head', 'token', 'hop'] if token_local else ['trial', 'head', 'hop']),
             'base_array_axes': ['head', 'hop'],
-            'gate_array_axes': ['head', 'hop', 'descriptor_feature'],
+            'gate_array_axes': (['head', 'feature', 'hop', 'descriptor_feature'] if feature_local else
+                               ['head', 'hop', 'descriptor_feature']),
             'standard_deviation_ddof': 0, 'saturation_normalized_threshold': .95,
             'attainable_delta_bound': delta_bound,
             'saturation_normalization': 'attainable_delta_bound',
-            'summary_reduction_axes': ['trial', 'token'] if token_local else ['trial'],
+            'summary_reduction_axes': (['trial', 'token', 'feature'] if feature_local else
+                                       ['trial', 'token'] if token_local else ['trial']),
             'heads': heads,
         }
         if token_local:
             layers[name].update({
                 'tokens': effective.shape[2], 'token_axis': getattr(module, 'token_axis', 'unspecified'),
-                'within_trial_token_std_axes': ['trial', 'head', 'hop'],
-                'delta_sum_over_hops_axes': ['trial', 'head', 'token'],
+                'node_labels': node_labels,
+                'within_trial_token_std_axes': (['trial', 'head', 'feature', 'hop'] if feature_local else
+                                                ['trial', 'head', 'hop']),
+                'delta_sum_over_hops_axes': (['trial', 'head', 'token', 'feature'] if feature_local else
+                                            ['trial', 'head', 'token']),
                 'delta_sum_over_hops_max_absolute': float(np.abs(delta_sum).max()),
                 'zero_sum_check_tolerance': tolerance,
             })
@@ -430,7 +489,18 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
                                            'hop projections and routed coefficients, before AGFL output projection/residual. '
                                            'They are not causal importance and do not account for cancellation between terms.',
                 })
-            _token_coefficient_heatmaps(writer, name, effective, bound_normalized, partition)
+            if feature_local:
+                layers[name].update({
+                    'features_per_head': effective.shape[3],
+                    'within_token_feature_std_axes': ['trial', 'head', 'token', 'hop'],
+                    'feature_summary_note': 'Features are learned head-local coordinates, not electrodes or classes. '
+                                            'Per-token means/stds summarize feature-averaged coefficients across trials; '
+                                            'per-token-feature fields retain each coordinate. Token std means average '
+                                            'per-feature token stds across trials/features; maxima retain all coordinates.',
+                })
+                _feature_coefficient_heatmaps(writer, name, effective, bound_normalized, partition, node_labels=node_labels)
+            else:
+                _token_coefficient_heatmaps(writer, name, effective, bound_normalized, partition, node_labels=node_labels)
             continue
         figure, axes = writer.plt.subplots(2, effective.shape[1], squeeze=False,
                                           figsize=(4 * effective.shape[1], 7), constrained_layout=True)
@@ -449,20 +519,52 @@ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partit
                     f'Actual coefficients and bounded adjustments on the selected {partition} trials. '
                     'Rows follow sample_ids in the accompanying NPZ and diagnostic manifest; these are not causal explanations.')
     summary = {
-        'schema_version': 2 if any(layer['coefficient_conditioning'] == 'token_contrast' for layer in layers.values()) else 1,
+        'schema_version': (3 if any(layer['coefficient_conditioning'] == 'feature_contrast' for layer in layers.values()) else
+                           2 if any(layer['coefficient_conditioning'] == 'token_contrast' for layer in layers.values()) else 1),
         'partition': partition, 'sample_ids': sample_ids.tolist(),
         'labels': labels.tolist(), 'layers': layers,
         'note': 'Coefficients are recomputed without gradients from each GraphFilter forward input, '
                 'across every diagnostic batch. Deltas are relative to activated checkpoint base coefficients. '
                 'normalized_deltas divide by configured scale; bound_normalized_deltas divide by the attainable '
-                'per-hop bound (equal to scale for trial_power, scale*(taps-1)/taps for token_contrast). '
+                'per-hop bound (equal to scale for trial_power, scale*(taps-1)/taps for token/feature routing). '
                 'Saturation means abs(bound_normalized_delta) > 0.95; variation is descriptive only.',
     }
     write_json(writer.root / 'coefficient_conditioning.json', summary)
     return summary
 
 
-def _token_coefficient_heatmaps(writer, name, effective, normalized, partition):
+def _feature_coefficient_heatmaps(writer, name, effective, normalized, partition, *, node_labels=None):
+    """Retain every trial, token and feature; group feature columns by token."""
+    limit = max(float(np.abs(effective).max()), 1e-12)
+    tokens, features = effective.shape[2:4]
+    for head in range(effective.shape[1]):
+        figure, axes = writer.plt.subplots(2, effective.shape[-1], squeeze=False,
+                                          figsize=(5 * effective.shape[-1], 7), constrained_layout=True)
+        for hop in range(effective.shape[-1]):
+            for row, source, title in ((0, effective, 'Effective coefficient'),
+                                       (1, normalized, 'Delta / attainable bound')):
+                axis = axes[row, hop]
+                array = source[:, head, :, :, hop].reshape(len(effective), tokens * features)
+                bound = limit if row == 0 else 1.
+                artist = axis.imshow(array, aspect='auto', cmap='RdBu_r', vmin=-bound, vmax=bound)
+                node_type = 'electrode' if node_labels else 'token'
+                axis.set(title=f'Head {head}, hop {hop}: {title}', ylabel='Diagnostic trial row',
+                         xlabel=f'Destination {node_type} (each group contains features 0–{features - 1})',
+                         xticks=np.arange(tokens) * features + (features - 1) / 2,
+                         xticklabels=node_labels if node_labels else np.arange(tokens))
+                if node_labels:
+                    axis.tick_params(axis='x', rotation=90, labelsize=6)
+                for token in range(1, tokens):
+                    axis.axvline(token * features - .5, color='black', linewidth=.4, alpha=.5)
+                figure.colorbar(artist, ax=axis)
+        writer.save(figure, f'filters/{slug(name)}_feature_coefficients_head_{head}',
+                    f'Actual feature-wise hop coefficients on selected {partition} trials. '
+                    'Columns are ordered token then feature; rows follow NPZ sample_ids. '
+                    'Feature indices are learned coordinates, not electrodes or classes. '
+                    'The second row divides adjustments by their attainable bound.')
+
+
+def _token_coefficient_heatmaps(writer, name, effective, normalized, partition, *, node_labels=None):
     """Keep every trial and token visible rather than averaging their routing."""
     limit = max(float(np.abs(effective).max()), 1e-12)
     for head in range(effective.shape[1]):
@@ -475,8 +577,10 @@ def _token_coefficient_heatmaps(writer, name, effective, normalized, partition):
                 axis = axes[row, hop]
                 bound = limit if row == 0 else 1.
                 artist = axis.imshow(array, aspect='auto', cmap='RdBu_r', vmin=-bound, vmax=bound)
-                axis.set(title=f'Head {head}, hop {hop}: {title}', xlabel='Destination token index',
+                axis.set(title=f'Head {head}, hop {hop}: {title}', xlabel='Destination electrode' if node_labels else 'Destination token index',
                          ylabel='Diagnostic trial row', xticks=range(array.shape[1]))
+                if node_labels:
+                    axis.set_xticklabels(node_labels, rotation=90, fontsize=6)
                 figure.colorbar(artist, ax=axis)
         writer.save(figure, f'filters/{slug(name)}_token_coefficients_head_{head}',
                     f'Actual destination-token coefficients on selected {partition} trials. '
@@ -558,6 +662,10 @@ def filter_figures(writer, model):
             caption = ('Learned AGFL base coefficients before destination-token adjustments. '
                        'Actual coefficients for every trial and token are saved in coefficient_conditioning.json '
                        'and its NPZ arrays; these base values alone do not describe the routed filter.')
+        if conditioning == 'feature_contrast':
+            caption = ('Learned AGFL base coefficients before destination-token and feature adjustments. '
+                       'Actual coefficients for every trial, token and feature are saved in '
+                       'coefficient_conditioning.json and its NPZ arrays.')
         writer.save(figure, 'filters/' + slug(name) + '_coefficients', caption)
         temperature_init = float(module.options.get('temperature_init', 1.0))
         temperature_active = module.options['score_scaling'] == 'temperature'
@@ -567,6 +675,7 @@ def filter_figures(writer, model):
             'coefficient_conditioning': conditioning,
             'coefficient_conditioning_scale': float(module.options.get('coefficient_conditioning_scale', .5)) if conditioning != 'static' else None,
             'coefficient_scope': ('sample_independent' if conditioning == 'static' else
+                                  'base_before_feature_adjustment' if conditioning == 'feature_contrast' else
                                   'base_before_token_adjustment' if conditioning == 'token_contrast' else
                                   'base_before_trial_adjustment'),
             'agfl_variant': module.options['agfl_variant'],
@@ -654,7 +763,7 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
     labels = bundle.y[indices]
     seed_everything(config['seeds'][0], config['deterministic'], config.get('threads', 1))
     current = provenance()
-    model = spec.build(model_options, bundle.metadata, attention_key, attention_options)
+    model = spec.rebuild_saved(model_options, bundle.metadata, attention_key, attention_options)
     model.load_state_dict(checkpoint['model'], strict=True)
     model.to(device).eval()
     writer = FigureWriter(output_dir)
@@ -682,8 +791,12 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
     coefficient_capture = TrialCoefficientCapture(model)
     from .temporal_statistics import TemporalStatisticsCapture, temporal_statistics_figures
     temporal_capture = TemporalStatisticsCapture(model)
+    from .temporal_gate import TemporalGateCapture, temporal_gate_figures, validation_ablation_figures
+    temporal_gate_capture = TemporalGateCapture(model)
     sample_ids = [bundle.sample_ids[i] for i in indices]
-    features, probabilities, maps, hooks = [], [], {}, [*coefficient_capture.hooks, *temporal_capture.hooks]
+    features, probabilities, maps, hooks = [], [], {}, [*coefficient_capture.hooks, *temporal_capture.hooks,
+                                                     *temporal_gate_capture.hooks]
+    batch_labels = None
     readout = model.feature_readout if hasattr(model, 'feature_readout') else model.classifier
     hooks.append(readout.register_forward_pre_hook(
         lambda module, args: features.append(args[0].detach().flatten(1).cpu().numpy())))
@@ -697,14 +810,23 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
             array = matrix.detach().cpu().numpy()
             statistics = map_statistics(array)
             count = len(array)
+            if batch_labels is None or len(batch_labels) != count:
+                raise ValueError('Graph rows do not align with the diagnostic trial labels')
             if name not in maps:
                 maps[name] = {'sum': np.zeros_like(array[0], dtype=np.float64), 'count': 0,
                               'first': array[0], 'kind': kind, 'token_axis': module.token_axis,
                               'sparsity': np.zeros(array.shape[1]), 'entropy': np.zeros(array.shape[1]),
-                              'entropy_valid': np.ones(array.shape[1], dtype=bool)}
+                              'entropy_valid': np.ones(array.shape[1], dtype=bool),
+                              'class_sums': {}, 'class_counts': {}}
             state = maps[name]
             state['sum'] += array.sum(axis=0, dtype=np.float64)
             state['count'] += count
+            for label in np.unique(batch_labels):
+                selected = batch_labels == label
+                key = int(label)
+                state['class_sums'].setdefault(key, np.zeros_like(array[0], dtype=np.float64))
+                state['class_sums'][key] += array[selected].sum(axis=0, dtype=np.float64)
+                state['class_counts'][key] = state['class_counts'].get(key, 0) + int(selected.sum())
             state['sparsity'] += np.asarray(statistics['sparsity_per_head']) * count
             for head, entropy in enumerate(statistics['entropy_per_head']):
                 if entropy is None:
@@ -718,18 +840,24 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
     try:
         with torch.no_grad():
             for start in range(0, len(values), 16):
+                batch_labels = labels[start:start+16]
                 coefficient_capture.start_batch(sample_ids[start:start+16])
                 temporal_capture.start_batch(sample_ids[start:start+16])
+                temporal_gate_capture.start_batch(sample_ids[start:start+16])
                 logits = model(torch.from_numpy(values[start:start+16]).to(device))
                 probabilities.append(logits.softmax(-1).cpu().numpy())
     finally:
         for hook in hooks:
             hook.remove()
     conditioning_statistics = coefficient_conditioning_figures(
-        writer, coefficient_capture, sample_ids, labels, partition)
+        writer, coefficient_capture, sample_ids, labels, partition, metadata=bundle.metadata)
     temporal_statistics = temporal_statistics_figures(
         writer, temporal_capture, sample_ids, labels,
         bundle.metadata.get('label_names') or [f'Class {i}' for i in range(bundle.metadata['num_classes'])], partition)
+    temporal_gate_statistics = temporal_gate_figures(writer, temporal_gate_capture, sample_ids, labels, partition,
+                                                     metadata=bundle.metadata)
+    temporal_gate_ablation = validation_ablation_figures(
+        writer, model, values, sample_ids, labels, np.concatenate(probabilities), device, partition)
     embedding_figure(writer, np.concatenate(features), labels, embedding, config['seeds'][0])
     statistics = {name: graph_figures(writer, name, state, bundle.metadata, info, values[0]) for name, state in maps.items()}
     write_json(writer.root / 'mixer_statistics.json', statistics)
@@ -752,6 +880,8 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
     return writer.finish({
         'schema_version': 1, 'kind': 'checkpoint_diagnostics', 'run_dir': str(directory),
         'dataset': config['dataset'], 'model': model_key, 'attention': attention_key, 'seed': config['seeds'][0],
+        'token_axis': model.token_axis, 'num_tokens': model.num_tokens,
+        'node_labels': bundle.metadata.get('channel_names') if model.token_axis == 'electrode' else None,
         'experiment_id': experiment_identity(config), 'comparison_id': comparison_identity(config),
         'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
         'checkpoint': source_fingerprint(checkpoint_path), 'partition': partition, 'max_samples': max_samples,
@@ -762,6 +892,10 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
         'filter_statistics_file': 'filter_statistics.json' if filter_statistics else None,
         'coefficient_conditioning_file': 'coefficient_conditioning.json' if conditioning_statistics else None,
         'temporal_statistics_file': 'temporal_statistics.json' if temporal_statistics else None,
+        'routing_gate_file': ('electrode_gate.json' if model.token_axis == 'electrode' else 'temporal_gate.json') if temporal_gate_statistics else None,
+        'routing_gate_ablation_file': temporal_gate_ablation['report_file'] if temporal_gate_ablation else None,
+        'temporal_gate_file': 'temporal_gate.json' if temporal_gate_statistics and model.token_axis != 'electrode' else None,
+        'temporal_gate_ablation_file': 'temporal_gate/validation_ablation.json' if temporal_gate_ablation and model.token_axis != 'electrode' else None,
         'checkpoint_policy': checkpoint.get('checkpoint_policy', {'weights': 'raw'}),
         'normalization': config['data'].get('normalization'), 'device': device, 'embedding': embedding,
         'training_provenance': saved_provenance, 'diagnostic_provenance': current,

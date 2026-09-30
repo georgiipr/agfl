@@ -24,20 +24,20 @@ def record(seed, accuracy, f1=None):
 
 
 def test_compact_eegnet_keeps_spatial_filters_and_feature_gradients():
-    cfg = resolve_config(load_preset('eegnet-bci2a'))
+    cfg = resolve_config(load_preset('eegnet-interchannel'))
     metadata = {'modality': 'eeg', 'channels': 22, 'samples': 1000, 'num_classes': 4}
     spec = get_model_spec('eegnet')
     torch.manual_seed(9)
     model = spec.build(cfg['model_options'], metadata, 'agfl', cfg['attention_options'])
-    assert model.block2[0].kernel_size == (22, 1)
-    assert model.token_axis == 'time' and model.num_tokens == 31
-    assert model.fc.in_features == 16 * 31
-    old = spec.build({}, metadata, 'agfl')
+    assert model.block2[0].kernel_size == (1, 1)
+    assert model.token_axis == 'electrode' and model.num_tokens == 22
+    assert model.fc.in_features == 32
+    old = spec.rebuild_saved({}, metadata, 'agfl')
     assert sum(p.numel() for p in model.parameters()) < sum(p.numel() for p in old.parameters()) / 4
     logits = model(torch.randn(4, 22, 1000))
     assert logits.shape == (4, 4)
     torch.nn.functional.cross_entropy(logits, torch.arange(4)).backward()
-    # AGFL starts with zero filter taps; the residual must still train EEGNet.
+    # The electrode encoder and classifier must receive finite, nonzero gradients.
     for layer in (model.block1[0], model.block2[0], model.fc):
         assert layer.weight.grad is not None
         assert torch.isfinite(layer.weight.grad).all()
@@ -60,31 +60,26 @@ def test_search_preview_does_not_load_data_or_train(monkeypatch, capsys, tmp_pat
     monkeypatch.setattr(agfl.models.eegnet.search, 'run_search', forbidden)
     main(['tune-eegnet', '--dry-run', '--data-dir', str(tmp_path), '--output-dir', str(tmp_path / 'out')])
     configs = json.loads(capsys.readouterr().out)
-    assert len(configs) == 5
+    assert len(configs) == 3
     for variants in configs.values():
         assert len(variants) == 9
         for cfg in variants:
             assert cfg['model'] == 'eegnet' and cfg['attention'] == 'agfl' and cfg['dataset'] == 'eeg'
-            assert cfg['model_options']['attention_axis'] == 'time'
+            assert cfg['model_options']['attention_axis'] == 'electrode'
             assert len(cfg['data']['subjects']) == 1 and cfg['seeds'] == list(range(5))
             assert cfg['data']['sessions'] == ['T'] and cfg['data']['filter_scope'] == 'trial'
             assert cfg['split'] == {'protocol': 'stratified', 'train': .6, 'validation': .2, 'test': .2}
 
 
-def test_spatial_augmentation_is_an_isolated_opt_in_comparison(tmp_path):
-    configs = search_configs(tmp_path, tmp_path / 'out', [1], list(range(5)),
-                             ['spatial_control', 'spatial_recombine'])
-    control = configs['spatial_control'][0]
-    augmented = deepcopy(configs['spatial_recombine'][0])
-    assert augmented['training']['augmentation']['recombine_segments'] == 8
-    assert augmented['training']['augmentation']['recombine_probability'] == .5
-    augmented['training']['augmentation']['recombine_segments'] = 0
-    # No change to model, loss, checkpoint rule, normalization, epoch budget,
-    # learning rate, split, seeds or any other augmentation option.
-    assert augmented == control
-    defaults = search_configs(tmp_path, tmp_path / 'default', [1], [0])
-    assert list(defaults) == ['spatial_control', 'compact_train_channel', 'compact_trialnorm',
-                              'compact_recombine', 'compact_recombine_slow']
+def test_electrode_sparsity_search_changes_only_the_edge_cutoff(tmp_path):
+    configs = search_configs(tmp_path, tmp_path / 'out', [1], list(range(5)))
+    assert list(configs) == ['electrode_control', 'electrode_dense', 'electrode_top8']
+    control = configs['electrode_control'][0]
+    for name, top_k in [('electrode_dense', None), ('electrode_top8', 8)]:
+        changed = deepcopy(configs[name][0])
+        assert changed['attention_options']['top_k'] == top_k
+        changed['attention_options']['top_k'] = control['attention_options']['top_k']
+        assert changed == control
 
 
 def test_recombination_uses_only_same_subject_class_training_donors():
@@ -164,7 +159,7 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
     root = tmp_path / 'search'
     artifacts, published = root / 'artifacts', root / 'report'
     configs = search_configs(tmp_path, root, [1], [0, 1],
-                             ['compact_train_channel', 'compact_trialnorm'], epochs=2)
+                             ['electrode_control', 'electrode_dense'], epochs=2)
     for experiments in configs.values():
         experiments[0]['split_dir'] = str(tmp_path / 'splits')
     x = np.random.default_rng(10).normal(size=(40, 2, 32)).astype(np.float32)
@@ -179,11 +174,11 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
         assert path.is_relative_to(artifacts / 'candidates')
         for name in ('selection_report.json', 'search_result.json', 'search_report.md'):
             assert not (published / name).exists(), name
-        seed, norm = cfg['seeds'][0], cfg['data']['normalization']
+        seed, norm = cfg['seeds'][0], str(cfg['attention_options']['top_k'])
         assert split['sample_ids'] == splits.setdefault(seed, split['sample_ids'])
         fits.append((seed, norm))
         (path / 'checkpoint.pt').write_text(f'{seed}:{norm}')
-        accuracy = .9 if (seed == 0) == (norm == 'train_channel') else .4
+        accuracy = .9 if (seed == 0) == (norm == 'scheduled') else .4
         result = {**record(seed, accuracy), 'config': cfg, 'subject_id': 'A01', 'elapsed_seconds': 1.}
         write_json(path / 'history.json', [{'epoch': 1, 'validation': result['validation']}])
         return result
@@ -193,8 +188,8 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
         assert (published / 'selection_report.json').read_bytes() == (artifacts / 'selection_report.json').read_bytes()
         assert len(list((published / 'runs' / 'candidates').rglob('selection.json'))) == 4
         assert path.is_relative_to(artifacts / 'selected')
-        seed, norm = cfg['seeds'][0], cfg['data']['normalization']
-        assert norm == ('train_channel' if seed == 0 else 'per_sample')
+        seed, norm = cfg['seeds'][0], str(cfg['attention_options']['top_k'])
+        assert norm == ('scheduled' if seed == 0 else 'None')
         tests.append((seed, norm))
         (path / 'predictions.npz').write_bytes(b'mocked predictions')
         return {'status': 'completed', 'config': cfg, 'subject_id': 'A01', 'seed': seed,
@@ -207,7 +202,7 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
     monkeypatch.setattr(agfl.engine, 'completed_run', completed)
     monkeypatch.setattr(agfl.reproducibility, 'provenance', lambda: {'source_sha256': 'test'})
     report = run_search(configs)
-    assert report['choices'] == {'A01': {'0': 'compact_train_channel', '1': 'compact_trialnorm'}}
+    assert report['choices'] == {'A01': {'0': 'electrode_control', '1': 'electrode_dense'}}
     assert report['mean_test_accuracy'] == .5 and not report['target_met']
     assert len(fits) == 4 and len(tests) == 2
     assert not list((artifacts / 'candidates').rglob('result.json'))
@@ -220,7 +215,7 @@ def test_search_selects_each_split_before_testing_and_resumes(tmp_path, monkeypa
     assert run_search(configs) == report
     assert len(fits) == 4 and len(tests) == 2
     # An aborted candidate is restarted in place, preserving unrelated files.
-    candidate = artifacts / 'candidates' / 'compact_trialnorm' / 'A01' / 'seed_1'
+    candidate = artifacts / 'candidates' / 'electrode_dense' / 'A01' / 'seed_1'
     write_json(candidate / 'failure.json', {'type': 'KeyboardInterrupt'})
     from agfl.session import mirror_run
     candidate_report = mirror_run(root, candidate)

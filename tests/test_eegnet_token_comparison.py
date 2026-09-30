@@ -95,7 +95,7 @@ def test_token_plot_labels_are_explicit_and_old_labels_do_not_change():
     config = resolve_config({'model': 'eegnet', 'attention': 'agfl',
                              'attention_options': {'coefficient_conditioning': 'token_contrast'}})
     config['subject_id'] = 'A03'
-    assert selection_label({'config': config}) == 'eegnet / AGFL (token routing, scale 0.5) / A03'
+    assert selection_label({'config': config}) == 'eegnet / AGFL (token routing, scale 0.5) / electrode graph / A03'
     assert attention_display_name('agfl', {}) == 'AGFL (static)'
     assert attention_display_name('agfl', {'coefficient_conditioning': 'trial_power'}) == 'AGFL (trial-conditioned, scale 0.5)'
     assert attention_display_name('agfl', {'coefficient_conditioning': 'token_contrast',

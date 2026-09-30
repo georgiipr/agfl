@@ -1,15 +1,23 @@
 # Experiment figures
 
-Plotting is an offline operation. It does not run during training, choose a new
+Current EEG graphs have electrode nodes, enforced before training. The
+[inter-channel guide](eeg_interchannel.md) supplies all current training and plot
+commands. EEG diagnostics export labeled per-head and per-class C×C matrices,
+complete directed edge CSV/NPZ files, source-weight scalp maps, scalp connection
+drawings, per-electrode hop coefficients and `electrode_gate/` plots. Unknown
+montage coordinates are reported as unavailable; channel matrices remain usable.
+ECG graphs remain temporal. Archived EEG time graphs remain labeled time graphs.
+
+Plotting is an offline operation. It does not run during optimization, choose a new
 checkpoint, or overwrite saved experiment metrics. Commands below are for the
 intended machine; the plotting implementation and supplied tests have not been
 executed locally.
 
 Training reruns now replace matching seed artifacts by default. Rerun analysis
 and checkpoint diagnostics afterwards to refresh exported figures; training does
-not regenerate them automatically.
+not regenerate them automatically unless `--report` is requested.
 
-The README contains the full workflow, dependency installation, result figures,
+The README contains the full workflow using the existing environment, result figures,
 every-subject/every-seed diagnostics, output indexes and diagnostic comparisons.
 BCI runs live under `artifacts/eeg/subject_Axx/`; each subject trains separately.
 Downloadable copies of their small records live under `report/runs`, with
@@ -19,10 +27,9 @@ original labels. See [session organization and existing-run migration](result_se
 
 ## Figures from completed runs
 
-Install the plotting extra on the analysis/experiment machine if needed:
+Use the existing environment on the analysis/experiment machine:
 
 ```bash
-python -m pip install -e '.[plots]'
 python main.py analyze results/full-eeg --plots
 ```
 

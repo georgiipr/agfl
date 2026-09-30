@@ -132,9 +132,7 @@ def test_report_failure_preserves_training_and_prints_manual_recovery(tmp_path, 
     with pytest.raises(RuntimeError, match=f'{failed_command} failed'):
         launch(['run', '--preset', 'mocked', '--report', '--skip-completed'])
 
-    expected = [('train', root, 'cpu', True), _diagnose(root, 'cpu')]
-    if failed_command == 'analyze':
-        expected.append(_analyze(root))
+    expected = [('train', root, 'cpu', True), _diagnose(root, 'cpu'), _analyze(root)]
     assert calls == expected  # Failure never routes back into training.
     assert checkpoint.read_bytes() == b'completed training checkpoint'
     output = capsys.readouterr()
@@ -145,6 +143,29 @@ def test_report_failure_preserves_training_and_prints_manual_recovery(tmp_path, 
     assert '--device cpu --partition validation --embedding tsne' in output.err
     assert 'python main.py analyze' in output.err
     assert '--plots' in output.err
+    if failed_command == 'diagnose-session':
+        assert 'generating result plots from saved predictions' in output.err
+
+
+def test_both_report_failures_preserve_the_original_diagnostic_error(tmp_path, monkeypatch, capsys):
+    root = tmp_path / 'failed-report'
+    commands = []
+    diagnostic_error = TypeError('diagnostic JSON serialization failed')
+
+    def command(argv):
+        commands.append(argv[0])
+        if argv[0] == 'diagnose-session':
+            raise diagnostic_error
+        raise OSError('result output unavailable')
+
+    monkeypatch.setattr(cli, 'main', command)
+    with pytest.raises(TypeError) as captured:
+        cli._generate_session_report(root, 'cuda')
+    assert captured.value is diagnostic_error
+    assert commands == ['diagnose-session', 'analyze']
+    messages = capsys.readouterr()
+    assert 'Result plot generation also failed: result output unavailable' in messages.err
+    assert 'Report generation finished' not in messages.out
 
 
 def test_report_preserves_nonzero_exit_status_from_diagnostic_command(tmp_path, monkeypatch, capsys):

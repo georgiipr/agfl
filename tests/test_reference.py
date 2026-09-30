@@ -21,7 +21,7 @@ def assert_frozen_weight_parity(key, modality, x):
                     graph_filter.alpha_logits.copy_(torch.linspace(-.2, .7, len(graph_filter.alpha_logits)))
     spec = get_model_spec(key)
     options = {'attention_axis': 'time', 'attention_residual': False} if modality == 'eeg' else {}
-    model = spec.build(options, {'modality': modality, 'channels': x.shape[1], 'samples': x.shape[2],
+    model = spec.rebuild_saved(options, {'modality': modality, 'channels': x.shape[1], 'samples': x.shape[2],
                                  'num_classes': 4 if modality == 'eeg' else 2}, 'agfl').double().eval()
     model.load_state_dict(original.state_dict(), strict=True)
     first, second = x.double().requires_grad_(), x.double().requires_grad_()

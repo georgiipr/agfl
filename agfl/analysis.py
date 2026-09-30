@@ -16,10 +16,24 @@ METRICS = ('accuracy', 'roc_auc', 'f1')
 PRIMARY = {'mha', 'performer', 'linformer', 'nystromformer'}
 
 
+def run_graph_axis(run):
+    """Read recorded semantics; never relabel an old EEG time graph as spatial."""
+    return run.get('token_axis') or run['config'].get('model_options', {}).get('attention_axis', 'unspecified')
+
+
 def attention_display_name(key, options=None):
     """Readable variant labels; raw method keys and saved identities stay intact."""
     options = options or {}
+    if key in {'agfl', 'mha'}:
+        additions = [label for flag, label in (('temporal_bias', 'temporal bias'), ('output_gate', 'output gate'))
+                     if options.get(flag, False)]
+        if additions:
+            original = {k: v for k, v in options.items() if k not in {'temporal_bias', 'output_gate'}}
+            return attention_display_name(key, original) + ' + ' + ' + '.join(additions)
     if key == 'agfl':
+        if options.get('coefficient_conditioning', 'static') == 'feature_contrast':
+            scale = options.get('coefficient_conditioning_scale', .5)
+            return f'AGFL (feature routing, scale {scale:g})'
         if options.get('coefficient_conditioning', 'static') == 'token_contrast':
             scale = options.get('coefficient_conditioning_scale', .5)
             return f'AGFL (token routing, scale {scale:g})'
@@ -36,10 +50,16 @@ def attention_display_name(key, options=None):
 
 
 def conditioning_control(candidate, control):
-    """Pair a conditioned AGFL with its otherwise identical static attention."""
+    """Pair conditioning ablations with matched static/token controls."""
     left, right = candidate.get('attention_options', {}), control.get('attention_options', {})
-    if (left.get('coefficient_conditioning', 'static') not in {'trial_power', 'token_contrast'}
-            or right.get('coefficient_conditioning', 'static') != 'static'):
+    left_mode = left.get('coefficient_conditioning', 'static')
+    right_mode = right.get('coefficient_conditioning', 'static')
+    static_control = (left_mode in {'trial_power', 'token_contrast', 'feature_contrast'}
+                      and right_mode == 'static')
+    token_control = (left_mode == 'feature_contrast' and right_mode == 'token_contrast'
+                     and left.get('coefficient_conditioning_scale', .5)
+                     == right.get('coefficient_conditioning_scale', .5))
+    if not (static_control or token_control):
         return False
     ignored = {'coefficient_conditioning', 'coefficient_conditioning_scale'}
     return ({k: v for k, v in left.items() if k not in ignored}
@@ -153,6 +173,8 @@ def subject_aggregates(runs):
             'deterministic', 'device', 'threads')}
         settings['data'] = {k: v for k, v in config['data'].items() if k != 'subjects'}
         settings['provenance'] = {k: config.get('provenance', {}).get(k) for k in ('source_sha256', 'packages')}
+        if 'study' in config:
+            settings.update(study=config['study'], study_arm=config['study_arm'])
         cohorts[digest(settings)[:20]].append(run)
     output = []
     for cohort, records in sorted(cohorts.items()):
@@ -163,23 +185,28 @@ def subject_aggregates(runs):
         # Different seed coverage is disclosed and must not produce a deceptively
         # complete overall score; individual rows remain available.
         same_seeds = all(seeds == seed_sets[subjects[0]] for seeds in seed_sets.values())
+        plan = records[0]['config'].get('study')
+        declared_complete = (plan is None or (set(subjects) == set(plan['subjects'])
+                             and all(set(seeds) == set(plan['seeds']) for seeds in seed_sets.values())))
         for partition, metric in itertools.product(('validation', 'test'), METRICS):
             means = []
             for subject in subjects:
                 values = [r[partition].get(metric) for r in records if r['config']['subject_id'] == subject]
                 if all(v is not None for v in values):
                     means.append(float(np.mean(values)))
-            complete = same_seeds and len(means) == len(subjects)
+            complete = same_seeds and declared_complete and len(means) == len(subjects)
             output.append({
                 'cohort_id': cohort, 'dataset': records[0]['dataset'], 'model': records[0]['backbone_key'],
                 'attention': records[0]['attention_key'],
+                'token_axis': run_graph_axis(records[0]),
                 'attention_label': attention_display_name(records[0]['attention_key'], records[0]['config'].get('attention_options', {})),
                 'partition': partition, 'metric': metric,
                 'subjects': subjects, 'n_subjects': len(subjects), 'seeds_by_subject': seed_sets,
                 'complete_seed_coverage': same_seeds,
+                'complete_declared_coverage': declared_complete,
                 'mean_of_subject_means': float(np.mean(means)) if complete else None,
                 'between_subject_sd': float(np.std(means, ddof=1)) if complete and len(means) > 1 else None,
-                'reason': None if complete else 'Unequal seed coverage or undefined subject metrics',
+                'reason': None if complete else 'Missing declared subjects/seeds, unequal seed coverage or undefined metrics',
             })
     return output
 
@@ -232,6 +259,7 @@ def analyze_results(input_root, output_dir):
             raise ValueError(f'Source code differs across seeds within {experiment}')
         summary = {k: first[k] for k in ('dataset', 'model', 'model_variant', 'experiment_id', 'comparison_id', 'parameter_count')}
         summary.update(model=first['backbone_key'], attention=first['attention_key'], subject_id=first['config'].get('subject_id'))
+        summary.update(token_axis=run_graph_axis(first), num_tokens=first.get('num_tokens'))
         summary.update(n_seeds=len(records), seeds=sorted(r['seed'] for r in records),
                        model_options=first['config']['model_options'],
                        attention_options=first['config'].get('attention_options', {}), metrics={})
@@ -253,6 +281,7 @@ def analyze_results(input_root, output_dir):
         summaries.append(summary)
         flat.append(row)
     comparisons = []
+    from .temporal_gate_study import temporal_gate_control, summarize_temporal_gate, write_study_report
     for agfl_id, agfl_runs in groups.items():
         if agfl_runs[0]['attention_key'] != 'agfl':
             continue
@@ -260,7 +289,9 @@ def analyze_results(input_root, output_dir):
             first = baseline_runs[0]
             is_control = (first['attention_key'] == 'agfl'
                           and conditioning_control(agfl_runs[0]['config'], first['config']))
-            if (not (first['attention_key'] in PRIMARY or is_control)
+            is_temporal_gate = (first['attention_key'] == 'agfl'
+                                and temporal_gate_control(agfl_runs[0]['config'], first['config']))
+            if (not (first['attention_key'] in PRIMARY or is_control or is_temporal_gate)
                     or first['backbone_key'] != agfl_runs[0]['backbone_key']
                     or first['comparison_id'] != agfl_runs[0]['comparison_id']):
                 continue
@@ -277,7 +308,8 @@ def analyze_results(input_root, output_dir):
                             subject_id=first['config'].get('subject_id'),
                             agfl_experiment_id=agfl_id, baseline_experiment_id=baseline_id,
                             baseline=first['attention_key'], metric=metric, comparison_id=first['comparison_id'],
-                            comparison_kind='coefficient_conditioning' if is_control else 'attention',
+                            comparison_kind=(('output_gate' if run_graph_axis(first) == 'electrode' else 'temporal_gate') if is_temporal_gate else
+                                             'coefficient_conditioning' if is_control else 'attention'),
                             agfl_label=attention_display_name('agfl', agfl_runs[0]['config'].get('attention_options', {})),
                             baseline_label=attention_display_name(first['attention_key'], first['config'].get('attention_options', {})),
                             n_unmatched_agfl=len(a_map.keys() - b_map.keys()),
@@ -293,12 +325,17 @@ def analyze_results(input_root, output_dir):
     paired_ids = {row[key] for row in comparisons for key in ('agfl_experiment_id', 'baseline_experiment_id')}
     across_subjects = subject_aggregates(runs)
     class_rows, class_summaries = class_statistics(runs)
+    temporal_gate = summarize_temporal_gate(runs)
+    from .multi_subject_study import summarize_subject_studies, write_subject_study_reports
+    subject_studies = summarize_subject_studies(runs)
     result = {'schema_version': 2, 'n_runs': len(runs), 'experiments': summaries, 'comparisons': comparisons,
               'across_subjects': across_subjects,
               'per_class': class_summaries,
+              'temporal_gate_studies': temporal_gate,
+              'subject_studies': subject_studies,
               'experiments_without_comparable_counterpart': sorted(set(groups) - paired_ids),
               'sources': [r['source'] for r in runs],
-              'methodology': 'Sample SD (ddof=1); paired AGFL minus attention baseline, plus conditioned minus otherwise identical static AGFL when present; two-sided tests; Wilcoxon differences rounded to 12 decimals; Holm family includes all supplied comparisons and metrics separately per test. Repeated overlapping splits are dependent, so seed-level inference is exploratory.'}
+              'methodology': 'Sample SD (ddof=1); paired AGFL minus attention baseline, plus matched conditioning and temporal/gate ablations when present; two-sided tests; Wilcoxon differences rounded to 12 decimals; Holm family includes all supplied comparisons and metrics separately per test. Repeated overlapping splits are dependent, so seed-level inference is exploratory. Temporal/gate architecture ranking uses validation only; interaction is descriptive.'}
     write_json(output / 'aggregation.json', result)
     write_csv(output / 'per_model.csv', flat)
     write_csv(output / 'per_subject.csv', [r for r in flat if r.get('subject_id')])
@@ -309,15 +346,26 @@ def analyze_results(input_root, output_dir):
     write_csv(output / 'statistical_comparisons.csv', comparisons)
     write_csv(output / 'per_class.csv', class_rows)
     write_csv(output / 'per_class_summary.csv', class_summaries)
+    if temporal_gate:
+        write_study_report(output, temporal_gate)
+    if subject_studies:
+        write_subject_study_reports(output, subject_studies)
     lines = ['# Saved experiment analysis', '', result['methodology'], '',
-             '| Dataset | Subject | Model | Attention | Seeds | Parameters | Accuracy | ROC-AUC | Macro F1 |',
-             '|---|---|---|---|---:|---:|---:|---:|---:|']
+             '| Dataset | Subject | Model | Graph nodes | Attention | Seeds | Parameters | Accuracy | ROC-AUC | Macro F1 |',
+             '|---|---|---|---|---|---:|---:|---:|---:|---:|']
     for row in summaries:
         formatted = []
         for metric in METRICS:
             value = row['metrics'][f'test_{metric}']
             formatted.append('undefined' if value['mean'] is None else f"{value['mean']:.4f} ± " + (f"{value['std']:.4f}" if value['std'] is not None else 'undefined'))
-        lines.append(f"| {row['dataset']} | {row.get('subject_id') or 'cohort'} | {row['model']} ({row['experiment_id'][:8]}) | {row['attention_label']} | {row['n_seeds']} | {row['parameter_count']} | " + ' | '.join(formatted) + ' |')
+        lines.append(f"| {row['dataset']} | {row.get('subject_id') or 'cohort'} | {row['model']} ({row['experiment_id'][:8]}) | {row['token_axis']} | {row['attention_label']} | {row['n_seeds']} | {row['parameter_count']} | " + ' | '.join(formatted) + ' |')
+    if subject_studies:
+        notices = ['## Declared subject study', '',
+                   '[Overall averages, subject-paired comparisons and completeness](subject_study.md).', '']
+        for study in subject_studies:
+            notices += [f"**{study['name']}: {'COMPLETE' if study['complete'] else 'INCOMPLETE'} — {study['completed_runs']}/{study['expected_runs']} fits.**", '']
+        # Put cohort coverage before the long per-subject/seed tables.
+        lines[4:4] = notices
     if across_subjects:
         lines += ['', '## Equal-weight subject summaries', '',
                   'Average seeds within each subject first. SD below is between subject means, not across all subject/seed runs.', '',
@@ -341,6 +389,8 @@ def analyze_results(input_root, output_dir):
             mean, sd = row['recall_mean'], row['recall_std']
             value = ('undefined' if mean is None else f'{mean:.4f}') + ' ± ' + ('undefined' if sd is None else f'{sd:.4f}')
             lines.append(f"| {row['model']} ({row['experiment_id'][:8]}) | {row.get('subject_id') or 'cohort'} | {row['attention_label']} | {row['class_name']} | {row['recall_n']} | {value} |")
+    if temporal_gate:
+        lines += ['', '[Temporal bias/output gate study: validation ranking, paired changes and interaction](temporal_gate_study.md).']
     lines += ['', 'Full configurations and pairing diagnostics are in aggregation.json; raw and Holm-adjusted p-values and effect sizes are in statistical_comparisons.csv.',
               'Synthetic fixtures and short smoke runs are validation artifacts, not estimates of scientific performance.']
     (output / 'report.md').write_text('\n'.join(lines) + '\n')

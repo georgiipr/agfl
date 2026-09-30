@@ -47,8 +47,20 @@ def _generate_session_report(root, device):
     root = Path(root).expanduser().resolve()
     print(f'Generating checkpoint diagnostics and result plots: {root}', flush=True)
     try:
-        main(['diagnose-session', str(root), '--device', str(device),
-              '--partition', 'validation', '--embedding', 'tsne'])
+        try:
+            main(['diagnose-session', str(root), '--device', str(device),
+                  '--partition', 'validation', '--embedding', 'tsne'])
+        except Exception:
+            # Saved predictions do not depend on checkpoint visualizations.
+            # Preserve useful result plots even if one diagnostic fails, then
+            # propagate the original failure so a partial report is explicit.
+            print('Checkpoint diagnostics failed; generating result plots from saved predictions.',
+                  file=sys.stderr)
+            try:
+                main(['analyze', str(root), '--plots'])
+            except Exception as analysis_error:
+                print(f'Result plot generation also failed: {analysis_error}', file=sys.stderr)
+            raise
         main(['analyze', str(root), '--plots'])
     except BaseException:
         print('Automatic report generation did not finish. Completed training artifacts '
@@ -102,18 +114,16 @@ def main(argv=None):
     sweep.add_argument('--report', action='store_true', help='After training, generate validation checkpoint diagnostics and result plots')
     tune = commands.add_parser('tune-eegnet', help='Validation-selected EEGNet + AGFL search; test only selected checkpoints')
     tune.add_argument('--data-dir', default='../ml', help='Directory containing A01T.gdf ... A09T.gdf')
-    tune.add_argument('--output-dir', default='results/eegnet-bci2a-search')
+    tune.add_argument('--output-dir', default='results/eegnet-interchannel-search-v1')
     tune.add_argument('--subjects', type=int, nargs='+', default=list(range(1, 10)))
     tune.add_argument('--seeds', type=int, nargs='+', default=list(range(5)))
     candidate_source = tune.add_mutually_exclusive_group()
     candidate_source.add_argument('--candidate', action='append', help=(
-        'Select a named candidate; repeat to choose several (default: original five). '
-        'Follow-ups are opt-in: spatial_recombine, spatial_batch48, spatial_qkv_* '
-        '(dense/sparse/renorm/top3), and refinements spatial_qkv_temp1, spatial_qkv_temp05, '
-        'spatial_qkv_identity_temp1, spatial_qkv_identity_temp05. '
-        'Include spatial_qkv_sparse as the fixed-scale refinement control.'))
+        'Select an electrode-graph candidate; repeat to choose several. '
+        'Default: electrode_control, electrode_dense, electrode_top8. '
+        'Old temporal EEG candidates are retired.'))
     candidate_source.add_argument('--candidate-set', help=(
-        'Use a named bounded candidate group, such as capacity; '
+        'Use a named bounded candidate group, such as electrode_sparsity; '
         'cannot be combined with --candidate.'))
     tune.add_argument('--epochs', type=int, help='Override epoch budget, e.g. 2 for a separate smoke check')
     tune.add_argument('--dry-run', action='store_true', help='Print configurations without loading recordings')
@@ -331,6 +341,7 @@ def main(argv=None):
     from .engine import run_experiment
     for config in resolved_configs:
         print(f"Launching {config['dataset']}/{config['model']} subject={config.get('subject_id') or 'cohort'} attention={config['attention']} ({config['model_variant']}) "
+              f"graph={'electrodes' if config['model_variant'] == 'eeg' else 'time'} "
               f"seeds={config['seeds']} epochs={config['training']['epochs']} device={config['device']}")
         run_experiment(config, skip_completed=args.skip_completed)
     _finish_training_reports(resolved_configs, automatic=args.report)

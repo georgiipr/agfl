@@ -48,12 +48,20 @@ def available_attentions():
 
 class AttentionFactory:
     """Inject attention without shifting initialization of the surrounding model."""
-    def __init__(self, key, options):
+    def __init__(self, key, options, *, modality=None, historical=False, channels=None):
         self.spec, self.options = get_attention_spec(key), deepcopy(options)
         self.count = 0
+        self.modality, self.historical, self.channels = modality, historical, channels
 
     def __call__(self, dim, tokens, layer_idx=0, depth=1, token_axis='time'):
         import torch
+        if not self.historical:
+            if self.modality == 'eeg' and (token_axis != 'electrode' or tokens != self.channels):
+                raise ValueError('EEG attention requires one graph node per electrode')
+            if self.modality == 'ecg' and token_axis not in {'time', 'time_patch'}:
+                raise ValueError('ECG attention requires temporal graph nodes')
+        if self.options.get('temporal_bias', False) and token_axis != 'time':
+            raise ValueError('temporal_bias requires time tokens, not electrode tokens')
         with torch.random.fork_rng(devices=[]):
             generator = torch.Generator().manual_seed((torch.initial_seed() + 104729 * (self.count + 1)) % (2**63))
             torch.set_rng_state(generator.get_state())

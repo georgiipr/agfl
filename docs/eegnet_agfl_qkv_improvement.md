@@ -1,3 +1,5 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # Improve AGFL on A03 before expanding the study
 
 The Q/K/V and three-neighbor studies below are complete. The current launch

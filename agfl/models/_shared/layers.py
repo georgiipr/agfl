@@ -31,6 +31,22 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.shape[1]]
 
 
+class ElectrodeIdentity(nn.Module):
+    """Learn sensor identities without treating channel-list gaps as distance.
+
+    Fixed input channel order is part of dataset/checkpoint provenance. These
+    embeddings are not coordinates or anatomical brain-region assignments.
+    """
+    def __init__(self, dim, channels):
+        super().__init__()
+        self.embedding = nn.Parameter(torch.zeros(1, channels, dim))
+
+    def forward(self, x):
+        if x.shape[1:] != self.embedding.shape[1:]:
+            raise ValueError('Electrode identity shape must match the channel feature tensor')
+        return x + self.embedding
+
+
 class CausalConv1d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation=1):
         super().__init__()

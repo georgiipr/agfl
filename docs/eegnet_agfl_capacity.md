@@ -1,3 +1,5 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # One-command EEGNet + AGFL capacity study on A03
 
 **Completed study:** the capacity-selected procedure reached **84.44%** mean

@@ -49,11 +49,12 @@ def test_dense_one_hop_matches_mha_in_each_backbone(key, modality, axis):
     metadata = {'modality': modality, 'channels': channels, 'samples': 65,
                 'num_classes': 3}
 
+    construct = spec.rebuild_saved if axis == 'time' and modality == 'eeg' else spec.build
     torch.manual_seed(43)
-    baseline = spec.build(options, metadata, 'mha').double().eval()
+    baseline = construct(options, metadata, 'mha').double().eval()
     baseline_rng = torch.get_rng_state().clone()
     torch.manual_seed(43)
-    graph_model = spec.build(options, metadata, 'agfl', DENSE_ONE_HOP).double().eval()
+    graph_model = construct(options, metadata, 'agfl', DENSE_ONE_HOP).double().eval()
     assert torch.equal(torch.get_rng_state(), baseline_rng)
 
     # This includes the stem, classifier, positional/BatchNorm buffers and all

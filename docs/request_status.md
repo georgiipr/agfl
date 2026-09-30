@@ -13,7 +13,7 @@ validation remains pending on the intended machine.
 | Shared data/train/evaluate policy | ModelSpec entry methods delegate to common loaders and engine. |
 | Five seeds and identical persisted splits | BCI IV 2a: separate experiment per subject, stratified T or T-to-E splits. ECG: patient groups. Runtime checks pending. |
 | Preserve AGFL mathematics | Active original polynomial defaults preserved. Independent forward/gradient checks supplied; no measured parity claim yet. |
-| EEG inter-electrode / ECG temporal analysis | Explicit default axes in every model; required architecture adaptations documented in model_attention_structure.md. |
+| EEG inter-electrode / ECG temporal analysis | Enforced for every new model/configuration. Temporal EEG presets retired; compact EEGNet electrode encoder and 22×22 diagnostics implemented. Historical checkpoints replay their original axes. See eeg_interchannel.md; runtime/accuracy unverified. |
 | Ablations | Attention settings and EEG/ECG matrices implemented. No-attention deliberately absent following the explicit removal instruction. |
 | Metrics and statistical comparisons | Saved-result aggregation, mean/sample SD, paired t/Wilcoxon, effects and Holm correction. Pairing requires the same actual backbone and protocol. |
 | Complete artifacts and replay | Config, checkpoint, history, predictions, split and result records with source/package/data identities. v2 replay checks supplied. |

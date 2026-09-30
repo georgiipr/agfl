@@ -6,6 +6,8 @@ class EEGModel(EEGEncoderBackbone):
     model_variant = 'eeg'
 
     def __init__(self, options, metadata, attention):
+        if options['attention_axis'] != 'electrode' and not getattr(attention, 'historical', False):
+            raise ValueError('EEGEncoder EEG attention must operate across electrodes')
         if options['attention_axis'] not in {'electrode', 'time'}:
             raise ValueError('EEGEncoder EEG attention_axis must be electrode or time')
         super().__init__(options, metadata, attention, electrode_tokens=options['attention_axis'] == 'electrode')

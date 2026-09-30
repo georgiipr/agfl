@@ -135,6 +135,37 @@ def test_signed_or_unnormalized_maps_do_not_get_probability_entropy():
     assert map_statistics(np.full((1, 1, 2, 2), .5))['entropy_per_head'][0] == pytest.approx(np.log(2))
 
 
+def test_electrode_exports_preserve_channel_order_and_edge_direction(tmp_path):
+    pytest.importorskip('matplotlib')
+    import csv
+    from agfl.visualization.common import FigureWriter
+    from agfl.visualization.diagnostics import graph_figures
+
+    mean = np.array([[[.1, .2, .7], [.6, .3, .1], [.2, .5, .3]]])
+    state = {'sum': mean * 2, 'count': 2, 'first': mean, 'kind': 'test routing',
+             'token_axis': 'electrode', 'sparsity': np.zeros(1), 'entropy': np.ones(1),
+             'entropy_valid': np.ones(1, dtype=bool),
+             'class_sums': {0: mean, 1: mean}, 'class_counts': {0: 1, 1: 1}}
+    metadata = {'modality': 'eeg', 'channels': 3, 'channel_names': ['C3', 'Cz', 'C4']}
+    writer = FigureWriter(tmp_path)
+    stats = graph_figures(writer, 'attention', state, metadata, None, np.zeros((3, 10)))
+    assert stats['node_labels'] == metadata['channel_names']
+    with (tmp_path / 'mixers/attention_electrode_edges.csv').open() as stream:
+        edges = list(csv.DictReader(stream))
+    assert len(edges) == 9
+    lookup = {(row['source_electrode'], row['destination_electrode']): float(row['mean_weight'])
+              for row in edges}
+    assert lookup['C4', 'C3'] == .7
+    assert lookup['C3', 'C4'] == .2
+    with np.load(tmp_path / 'mixers/attention.npz', allow_pickle=False) as saved:
+        assert saved['token_axis'].item() == 'electrode'
+        assert saved['node_labels'].tolist() == metadata['channel_names']
+        assert saved['class_labels'].tolist() == [0, 1]
+        np.testing.assert_array_equal(saved['class_means'], np.stack([mean, mean]))
+    assert any(row['name'].endswith('_electrode_connections') for row in writer.skipped)
+    assert (tmp_path / 'mixers/attention_class_0_electrodes.pdf').is_file()
+
+
 def test_result_figures_need_no_dataset_or_checkpoint_execution(tmp_path, monkeypatch):
     pytest.importorskip('matplotlib')
     directory, _ = saved_fixture(tmp_path)
@@ -158,7 +189,7 @@ def test_result_figures_need_no_dataset_or_checkpoint_execution(tmp_path, monkey
 @pytest.mark.parametrize('model_key,attention,axis', [
     ('signal_transformer', 'agfl', None), ('eegnet', 'agfl', None),
     ('eegencoder', 'mha', None), ('dstseegencoder', 'linformer', None),
-    ('conformer', 'performer', None), ('eegnet', 'nystromformer', 'time'),
+    ('conformer', 'performer', None), ('eegnet', 'nystromformer', 'electrode'),
 ])
 def test_checkpoint_diagnostics_preserve_run_and_use_selected_partition(tmp_path, monkeypatch, model_key, attention, axis):
     pytest.importorskip('matplotlib')

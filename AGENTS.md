@@ -45,6 +45,10 @@ These instructions apply to this repository and all its subdirectories.
 - When providing training commands, also provide checkpoint-diagnostic and
   result-plot commands in **separate copyable blocks**. State the working
   directory, dataset path, environment, resources, and output folder clearly.
+- Use **`rsync`** for cluster-to-Mac download commands. Default to
+  `rsync -av --progress` so new and changed files are transferred. Add
+  `--ignore-existing` when the user explicitly requests skipping every
+  existing destination file; preserve the intended local folder layout.
 
 ## Communication
 

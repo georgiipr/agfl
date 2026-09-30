@@ -15,6 +15,7 @@ TRAINING_DEFAULTS = {
     "class_weights": "balanced", "focal_gamma": 2.0, "scheduler": "warmup_cosine",
     "warmup_epochs": 10, "min_lr_ratio": 0.0, "checkpoint_criterion": "accuracy",
     "checkpoint_tiebreaker": "none", "ema_decay": 0.0,
+    "save_checkpoints": True,
     "gradient_clip": None, "num_workers": 0, "amp": False,
     "early_stopping_patience": 0, "early_stopping_min_epochs": 0,
     "augmentation": {"shift": 0, "scale": 0.0, "noise": 0.0,
@@ -81,7 +82,7 @@ def resolve_config(config):
         if 'seeds' in config:
             raise ValueError('Use seed or seeds, not both')
         config["seeds"] = [config.pop("seed")]
-    allowed = set(DEFAULTS) | {"resolved_metadata", "dataset_fingerprint", "expected_split_id", "provenance", "comparison_family"}
+    allowed = set(DEFAULTS) | {"resolved_metadata", "dataset_fingerprint", "expected_split_id", "provenance", "comparison_family", "study", "study_arm"}
     unknown = set(config) - allowed
     if unknown:
         raise ValueError(f"Unknown configuration keys: {sorted(unknown)}")
@@ -110,6 +111,8 @@ def resolve_config(config):
     if unknown:
         raise ValueError(f"Unknown options for attention {resolved['attention']}: {sorted(unknown)}")
     resolved['attention_options'] = merge(model_spec.attention_defaults_for(resolved['attention']), attention_options)
+    from .models._shared.modality import validate_attention_domain
+    validate_attention_domain(dataset_spec.modality, resolved['model_options'], resolved['attention_options'])
     if type(resolved['attention_options']['heads']) is not int or resolved['attention_options']['heads'] < 1:
         raise ValueError('attention_options.heads must be a positive integer')
     resolved['training'] = merge(merge(TRAINING_DEFAULTS, model_spec.training_defaults_for(dataset_spec.modality)), config.get('training', {}))
@@ -133,6 +136,8 @@ def resolve_config(config):
         raise ValueError('threads must be a positive integer')
     if type(resolved['deterministic']) is not bool or type(t['amp']) is not bool:
         raise ValueError('deterministic and amp must be booleans')
+    if type(t['save_checkpoints']) is not bool:
+        raise ValueError('training.save_checkpoints must be boolean')
     for key in ('learning_rate', 'weight_decay', 'focal_gamma', 'momentum', 'min_lr_ratio'):
         if not isinstance(t[key], (int, float)) or not math.isfinite(t[key]):
             raise ValueError(f'training.{key} must be finite')
@@ -184,6 +189,9 @@ def resolve_config(config):
     for key in ("data_dir", "path", "labels_dir"):
         if resolved["data"].get(key):
             resolved["data"][key] = str(Path(resolved["data"][key]).expanduser().resolve())
+    if 'study' in resolved or 'study_arm' in resolved:
+        from .multi_subject_study import validate_study_config
+        validate_study_config(resolved)
     return resolved
 
 

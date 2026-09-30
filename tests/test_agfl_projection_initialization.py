@@ -148,10 +148,10 @@ def test_identity_hop_transforms_preserve_initial_eegnet_computation_at_fifteen_
     projected_options = {**baseline_options, 'filter_projection': 'separate',
                          'filter_projection_init': 'identity'}
     torch.manual_seed(127)
-    baseline = spec.build(model_options, metadata, 'agfl', baseline_options).double().eval()
+    baseline = spec.rebuild_saved(model_options, metadata, 'agfl', baseline_options).double().eval()
     expected_rng = torch.get_rng_state().clone()
     torch.manual_seed(127)
-    projected = spec.build(model_options, metadata, 'agfl', projected_options).double().eval()
+    projected = spec.rebuild_saved(model_options, metadata, 'agfl', projected_options).double().eval()
     assert torch.equal(torch.get_rng_state(), expected_rng)
     assert baseline.num_tokens == projected.num_tokens == 15
     baseline_state, projected_state = baseline.state_dict(), projected.state_dict()

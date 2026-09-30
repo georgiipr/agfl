@@ -1,0 +1,131 @@
+{
+  "base": {
+    "dataset": "eeg",
+    "model": "eegnet",
+    "device": "cuda",
+    "deterministic": true,
+    "threads": 1,
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "data": {
+      "data_dir": "../ml",
+      "subjects": [
+        3
+      ],
+      "sessions": [
+        "T"
+      ],
+      "normalization": "train_channel",
+      "filter_scope": "trial",
+      "lowcut": 2.0,
+      "highcut": 30.0,
+      "offset_seconds": 0.0,
+      "window": 1000,
+      "artifact_policy": "exclude"
+    },
+    "split": {
+      "protocol": "stratified",
+      "train": 0.6,
+      "validation": 0.2,
+      "test": 0.2
+    },
+    "model_options": {
+      "attention_axis": "time",
+      "temp_kernel": 32,
+      "f1": 16,
+      "d": 2,
+      "f2": 32,
+      "pk1": 8,
+      "pk2": 16,
+      "dropout_rate": 0.5,
+      "attention_residual": true,
+      "attention_dropout": 0.0,
+      "batch_norm_momentum": 0.1,
+      "batch_norm_eps": 1e-05,
+      "initialization": "pytorch",
+      "max_norm1": 1.0,
+      "max_norm2": 0.25,
+      "spatial_readout": "learned",
+      "temporal_statistics": "mean"
+    },
+    "attention_options": {
+      "heads": 4
+    },
+    "training": {
+      "epochs": 250,
+      "batch_size": 64,
+      "optimizer": "adamw",
+      "learning_rate": 0.005,
+      "weight_decay": 0.001,
+      "momentum": 0.9,
+      "loss": "focal",
+      "class_weights": "balanced",
+      "focal_gamma": 3.0,
+      "checkpoint_criterion": "accuracy",
+      "scheduler": "warmup_cosine",
+      "warmup_epochs": 10,
+      "min_lr_ratio": 0.0,
+      "gradient_clip": null,
+      "early_stopping_patience": 0,
+      "early_stopping_min_epochs": 100,
+      "amp": false,
+      "num_workers": 0,
+      "augmentation": {
+        "shift": 0,
+        "scale": 0.0,
+        "noise": 0.0,
+        "recombine_segments": 0,
+        "recombine_probability": 0.5
+      },
+      "ema_decay": 0.0,
+      "checkpoint_tiebreaker": "none"
+    },
+    "output_dir": "results/eegnet-A03-temporal-gate-baselines-v1"
+  },
+  "experiments": [
+    {
+      "attention": "agfl",
+      "attention_options": {
+        "K": 2,
+        "agfl_variant": "polynomial",
+        "coefficient_activation": "identity",
+        "coefficient_init": "one_hop",
+        "filter_projection": "none",
+        "graph_normalization": "softmax",
+        "hop_normalization": "feature",
+        "learnable_coefficients": true,
+        "post_topk_renormalize": true,
+        "projection": "qkv",
+        "qkv_bias": true,
+        "score_scaling": "sqrt_dim",
+        "top_k": "scheduled",
+        "top_k_schedule": {
+          "alpha": 3.0,
+          "smax": 0.2,
+          "smin": 0.8
+        },
+        "top_k_stage": "scores",
+        "top_k_ties": "threshold",
+        "coefficient_conditioning": "token_contrast",
+        "coefficient_conditioning_scale": 0.5,
+        "temporal_bias": true,
+        "output_gate": true
+      }
+    },
+    {
+      "attention": "mha",
+      "attention_options": {}
+    },
+    {
+      "attention": "linformer",
+      "attention_options": {
+        "projection_rank": 4
+      }
+    }
+  ]
+}

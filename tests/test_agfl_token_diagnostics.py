@@ -222,6 +222,23 @@ def test_unmoved_token_gate_has_no_false_variation_and_base_plot_is_labeled(tmp_
         assert head['delta_sum_over_hops_max_absolute'] == 0.
 
 
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_token_summary_serializes_the_training_dtype_tolerance(tmp_path, dtype):
+    # The other formula checks use float64, which JSON happens to accept as a
+    # scalar. Real checkpoints use float32; its NumPy scalar must not leak into
+    # the saved summary even when it wins the tolerance's max comparison.
+    model = token_model().to(dtype=dtype)
+    ids = ['a', 'b', 'c', 'd', 'e']
+    capture = capture_tokens(model, token_values().to(dtype=dtype), ids)
+    summary = coefficient_conditioning_figures(
+        TokenWriter(tmp_path), capture, ids, [0, 1, 2, 3, 0], 'validation')
+    tolerance = summary['layers']['attention']['zero_sum_check_tolerance']
+    assert type(tolerance) is float
+    assert tolerance == pytest.approx(max(1e-7, float(torch.finfo(dtype).eps) * 3 * 8))
+    assert json.loads(json.dumps(summary, allow_nan=False)) == summary
+    assert json.loads((tmp_path / 'coefficient_conditioning.json').read_text()) == summary
+
+
 def test_token_capture_rejects_reordered_head_ids(tmp_path):
     ids = ['a', 'b', 'c', 'd', 'e']
     capture = capture_tokens(token_model(), token_values(), ids)

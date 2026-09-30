@@ -1,0 +1,880 @@
+--- a/agfl/analysis.py
++++ b/agfl/analysis.py
+@@ -20,6 +20,9 @@
+     """Readable variant labels; raw method keys and saved identities stay intact."""
+     options = options or {}
+     if key == 'agfl':
++        if options.get('coefficient_conditioning', 'static') == 'token_energy':
++            scale = options.get('coefficient_conditioning_scale', .5)
++            return f'AGFL (token energy routing, scale {scale:g})'
+         if options.get('coefficient_conditioning', 'static') == 'feature_contrast':
+             scale = options.get('coefficient_conditioning_scale', .5)
+             return f'AGFL (feature routing, scale {scale:g})'
+@@ -43,9 +46,9 @@
+     left, right = candidate.get('attention_options', {}), control.get('attention_options', {})
+     left_mode = left.get('coefficient_conditioning', 'static')
+     right_mode = right.get('coefficient_conditioning', 'static')
+-    static_control = (left_mode in {'trial_power', 'token_contrast', 'feature_contrast'}
++    static_control = (left_mode in {'trial_power', 'token_contrast', 'feature_contrast', 'token_energy'}
+                       and right_mode == 'static')
+-    token_control = (left_mode == 'feature_contrast' and right_mode == 'token_contrast'
++    token_control = (left_mode in {'feature_contrast', 'token_energy'} and right_mode == 'token_contrast'
+                      and left.get('coefficient_conditioning_scale', .5)
+                      == right.get('coefficient_conditioning_scale', .5))
+     if not (static_control or token_control):
+--- a/agfl/attention/agfl/config.py
++++ b/agfl/attention/agfl/config.py
+@@ -4,7 +4,7 @@
+     'top_k_schedule': {'smax': .2, 'smin': .8, 'alpha': 3.0},
+     'graph_normalization': 'softmax', 'post_topk_renormalize': True,
+     'coefficient_activation': 'identity', 'coefficient_init': 'zeros',
+-    # Token/feature contrast are opt-in; defaults stay static.
++    # Token/feature contrast and token_energy are opt-in; defaults stay static.
+     'coefficient_conditioning': 'static', 'coefficient_conditioning_scale': 0.5,
+     'learnable_coefficients': True, 'projection': 'split_input', 'qkv_bias': False,
+     'filter_projection': 'separate', 'filter_projection_init': 'pytorch',
+--- a/agfl/attention/agfl/layer.py
++++ b/agfl/attention/agfl/layer.py
+@@ -8,6 +8,30 @@
+ from torch import nn
+ from torch.nn import functional as F
+ 
++TOKEN_CONDITIONING = frozenset({'token_contrast', 'feature_contrast', 'token_energy'})
++TOKEN_ENERGY_EPS = 1e-6
++
++
++def token_energy_features(values, first_hop):
++    """Two bounded, within-trial descriptors; never EEG band-power estimates.
++
++    Inputs are [batch, token, feature]. Reductions use features and then
++    tokens, never examples. Promote before squares/subtraction under AMP;
++    preserve float64 for numerical-reference calculations.
++    """
++    if values.ndim != 3 or first_hop.shape != values.shape:
++        raise ValueError('Token energy inputs must have matching [batch, token, feature] shapes')
++    with torch.autocast(device_type=values.device.type, enabled=False):
++        working = values if values.dtype == torch.float64 else values.float()
++        first = first_hop.to(working.dtype)
++        energy = working.square().mean(dim=-1)
++        first_energy = first.square().mean(dim=-1)
++        log_energy = (energy + TOKEN_ENERGY_EPS).log()
++        relative_energy = (log_energy - log_energy.mean(dim=-1, keepdim=True)).tanh()
++        contrast = (first - working).square().mean(dim=-1)
++        strength = contrast / (2 * (energy + first_energy) + TOKEN_ENERGY_EPS)
++        centered_strength = strength - strength.mean(dim=-1, keepdim=True)
++        return torch.stack((relative_energy, centered_strength), dim=-1)
+ 
+ 
+ def sparsity_schedule(layer_idx, depth, smax=0.2, smin=0.8, alpha=3.0):
+@@ -136,8 +160,8 @@
+         if type(options['learnable_coefficients']) is not bool:
+             raise ValueError('learnable_coefficients must be a boolean')
+         self.conditioning = options.get('coefficient_conditioning', 'static')
+-        if self.conditioning not in {'static', 'trial_power', 'token_contrast', 'feature_contrast'}:
+-            raise ValueError('coefficient_conditioning must be static, trial_power, token_contrast or feature_contrast')
++        if self.conditioning not in {'static', 'trial_power'} | TOKEN_CONDITIONING:
++            raise ValueError('coefficient_conditioning must be static, trial_power, token_contrast, feature_contrast or token_energy')
+         self.conditioning_scale = options.get('coefficient_conditioning_scale', 0.5)
+         if (isinstance(self.conditioning_scale, bool)
+                 or not isinstance(self.conditioning_scale, (int, float))
+@@ -148,7 +172,7 @@
+                 raise ValueError(f'{self.conditioning} conditioning requires identity activation and learnable coefficients')
+             if dim < 2:
+                 raise ValueError(f'{self.conditioning} conditioning requires at least two features per head')
+-        if self.conditioning in {'token_contrast', 'feature_contrast'} and options['K'] < 1:
++        if self.conditioning in TOKEN_CONDITIONING and options['K'] < 1:
+             raise ValueError(f'{self.conditioning} conditioning requires K >= 1')
+         if options['coefficient_init'] == 'zeros':
+             if options['coefficient_activation'] == 'relu':
+@@ -193,12 +217,16 @@
+         # No bias: alpha_logits already supplies each hop's static offset.
+         # The zero map preserves the selected static recipe at initialization,
+         # including RNG state and the initialization of every later parameter.
+-        descriptor_dim = 2 * dim if self.conditioning in {'token_contrast', 'feature_contrast'} else dim
++        descriptor_dim = 2 * dim if self.conditioning in TOKEN_CONDITIONING else dim
+         # Feature routing learns a separate hop mixture for each head-local
+         # output feature; flattening is feature-major, then hop-major.
+         gate_outputs = dim * taps if self.conditioning == 'feature_contrast' else taps
+         self.coefficient_gate = (_ZeroLinear(descriptor_dim, gate_outputs, bias=False)
+                                  if self.conditioning != 'static' else None)
++        # A separate zero map retains the old router's keys and arithmetic.
++        # Four heads and three taps add exactly 4*3*2 = 24 weights, no RNG draws.
++        self.energy_gate = (_ZeroLinear(2, taps, bias=False)
++                            if self.conditioning == 'token_energy' else None)
+ 
+     def _static_coefficients(self):
+         activations = {'identity': lambda x: x, 'relu': F.relu, 'sigmoid': torch.sigmoid,
+@@ -208,7 +236,7 @@
+     def coefficient_values(self, values, graph=None, *, first_hop=None):
+         """Effective coefficients for these head-local value features.
+ 
+-        Static/trial-power coefficients have axes [batch, hop]; token-contrast
++        Static/trial-power coefficients have axes [batch, hop]; token-contrast/energy
+         coefficients have axes [batch, token, hop]. Feature-contrast adds a
+         feature axis before hop: [batch, token, feature, hop]. Both redistribute
+         the hop mixture without changing its sum (per feature when applicable).
+@@ -217,7 +245,7 @@
+         alpha = self._static_coefficients().unsqueeze(0).expand(values.shape[0], -1)
+         if self.coefficient_gate is None:
+             return alpha
+-        if self.conditioning in {'token_contrast', 'feature_contrast'}:
++        if self.conditioning in TOKEN_CONDITIONING:
+             if first_hop is None:
+                 if graph is None:
+                     raise ValueError(f'{self.conditioning} coefficients require graph or first_hop')
+@@ -233,7 +261,11 @@
+                 descriptor = torch.cat((
+                     F.layer_norm(working, (values.shape[-1],), eps=1e-5),
+                     F.layer_norm(contrast, (values.shape[-1],), eps=1e-5)), dim=-1)
+-                routed = F.linear(descriptor, self.coefficient_gate.weight.to(working.dtype)).tanh()
++                logits = F.linear(descriptor, self.coefficient_gate.weight.to(working.dtype))
++                if self.energy_gate is not None:
++                    energy_descriptor = token_energy_features(working, first_hop)
++                    logits = logits + F.linear(energy_descriptor, self.energy_gate.weight.to(working.dtype))
++                routed = logits.tanh()
+                 base = alpha.to(working.dtype).unsqueeze(1)
+                 if self.conditioning == 'feature_contrast':
+                     routed = routed.reshape(*values.shape, self.alpha_logits.numel())
+@@ -253,7 +285,7 @@
+         return coefficients.to(self.alpha_logits.dtype)
+ 
+     def forward(self, graph, values):
+-        if self.conditioning in {'token_contrast', 'feature_contrast'}:
++        if self.conditioning in TOKEN_CONDITIONING:
+             # Reuse exactly the propagated features being mixed. No duplicate
+             # graph construction, extra graph hop, or retained autograd cache.
+             hops = tuple(propagate(graph, values, self.options['K'], self.options['agfl_variant'],
+--- /dev/null
++++ b/agfl/presets/eegnet-a03-token-energy.json
+@@ -0,0 +1,156 @@
++{
++  "base": {
++    "dataset": "eeg",
++    "model": "eegnet",
++    "device": "cuda",
++    "deterministic": true,
++    "threads": 1,
++    "seeds": [
++      0,
++      1,
++      2,
++      3,
++      4
++    ],
++    "data": {
++      "data_dir": "../ml",
++      "subjects": [
++        3
++      ],
++      "sessions": [
++        "T"
++      ],
++      "normalization": "train_channel",
++      "filter_scope": "trial",
++      "lowcut": 2.0,
++      "highcut": 30.0,
++      "offset_seconds": 0.0,
++      "window": 1000,
++      "artifact_policy": "exclude"
++    },
++    "split": {
++      "protocol": "stratified",
++      "train": 0.6,
++      "validation": 0.2,
++      "test": 0.2
++    },
++    "model_options": {
++      "attention_axis": "time",
++      "temp_kernel": 32,
++      "f1": 16,
++      "d": 2,
++      "f2": 32,
++      "pk1": 8,
++      "pk2": 16,
++      "dropout_rate": 0.5,
++      "attention_residual": true,
++      "attention_dropout": 0.0,
++      "batch_norm_momentum": 0.1,
++      "batch_norm_eps": 1e-05,
++      "initialization": "pytorch",
++      "max_norm1": 1.0,
++      "max_norm2": 0.25,
++      "spatial_readout": "learned",
++      "temporal_statistics": "mean"
++    },
++    "attention_options": {
++      "heads": 4
++    },
++    "training": {
++      "epochs": 250,
++      "batch_size": 64,
++      "optimizer": "adamw",
++      "learning_rate": 0.005,
++      "weight_decay": 0.001,
++      "momentum": 0.9,
++      "loss": "focal",
++      "class_weights": "balanced",
++      "focal_gamma": 3.0,
++      "checkpoint_criterion": "accuracy",
++      "scheduler": "warmup_cosine",
++      "warmup_epochs": 10,
++      "min_lr_ratio": 0.0,
++      "gradient_clip": null,
++      "early_stopping_patience": 0,
++      "early_stopping_min_epochs": 100,
++      "amp": false,
++      "num_workers": 0,
++      "augmentation": {
++        "shift": 0,
++        "scale": 0.0,
++        "noise": 0.0,
++        "recombine_segments": 0,
++        "recombine_probability": 0.5
++      },
++      "ema_decay": 0.0,
++      "checkpoint_tiebreaker": "none"
++    },
++    "output_dir": "results/eegnet-A03-token-energy-v1"
++  },
++  "experiments": [
++    {
++      "attention": "agfl",
++      "attention_options": {
++        "K": 2,
++        "agfl_variant": "polynomial",
++        "coefficient_activation": "identity",
++        "coefficient_init": "one_hop",
++        "filter_projection": "none",
++        "graph_normalization": "softmax",
++        "hop_normalization": "feature",
++        "learnable_coefficients": true,
++        "post_topk_renormalize": true,
++        "projection": "qkv",
++        "qkv_bias": true,
++        "score_scaling": "sqrt_dim",
++        "top_k": "scheduled",
++        "top_k_schedule": {
++          "alpha": 3.0,
++          "smax": 0.2,
++          "smin": 0.8
++        },
++        "top_k_stage": "scores",
++        "top_k_ties": "threshold",
++        "coefficient_conditioning": "token_contrast",
++        "coefficient_conditioning_scale": 0.5
++      }
++    },
++    {
++      "attention": "agfl",
++      "attention_options": {
++        "K": 2,
++        "agfl_variant": "polynomial",
++        "coefficient_activation": "identity",
++        "coefficient_init": "one_hop",
++        "filter_projection": "none",
++        "graph_normalization": "softmax",
++        "hop_normalization": "feature",
++        "learnable_coefficients": true,
++        "post_topk_renormalize": true,
++        "projection": "qkv",
++        "qkv_bias": true,
++        "score_scaling": "sqrt_dim",
++        "top_k": "scheduled",
++        "top_k_schedule": {
++          "alpha": 3.0,
++          "smax": 0.2,
++          "smin": 0.8
++        },
++        "top_k_stage": "scores",
++        "top_k_ties": "threshold",
++        "coefficient_conditioning": "token_energy",
++        "coefficient_conditioning_scale": 0.5
++      }
++    },
++    {
++      "attention": "mha",
++      "attention_options": {}
++    },
++    {
++      "attention": "linformer",
++      "attention_options": {
++        "projection_rank": 4
++      }
++    }
++  ]
++}
+--- a/agfl/visualization/diagnostics.py
++++ b/agfl/visualization/diagnostics.py
+@@ -238,6 +238,7 @@
+                 'coefficients': [[] for _ in module.filters],
+                 'sample_ids': [[] for _ in module.filters],
+                 'hop_diagnostics': [[] for _ in module.filters],
++                'energy_diagnostics': [[] for _ in module.filters],
+             }
+             for head, graph_filter in enumerate(module.filters):
+                 self.hooks.append(graph_filter.register_forward_hook(self._capture(name, head)))
+@@ -250,7 +251,7 @@
+     def _capture(self, name, head):
+         def hook(graph_filter, args, output):
+             import torch
+-            from agfl.attention.agfl.layer import propagate
++            from agfl.attention.agfl.layer import TOKEN_CONDITIONING, propagate, token_energy_features
+             if self.sample_ids is None:
+                 raise ValueError('Set diagnostic sample IDs before capturing coefficients')
+             # GraphFilter receives (graph, values). Neither the graph nor a
+@@ -261,7 +262,7 @@
+             with torch.no_grad():
+                 conditioning = graph_filter.options.get('coefficient_conditioning', 'static')
+                 feature_local = conditioning == 'feature_contrast'
+-                token_local = conditioning in {'token_contrast', 'feature_contrast'}
++                token_local = conditioning in TOKEN_CONDITIONING
+                 if token_local:
+                     hops = tuple(propagate(args[0].detach(), values, graph_filter.options['K'],
+                                            graph_filter.options['agfl_variant'],
+@@ -288,6 +289,29 @@
+                         'propagated_hop_cosine_valid': valid_pairs.cpu().numpy().copy(),
+                         'hop_contribution_norms': contribution_norms.cpu().numpy().copy(),
+                     })
++                    if conditioning == 'token_energy':
++                        # Counterfactual coefficients at the same saved values
++                        # and graph, without mutating any checkpoint parameter.
++                        with torch.autocast(device_type=values.device.type, enabled=False):
++                            working = values if values.dtype == torch.float64 else values.float()
++                            energy = token_energy_features(working, hops[1])
++                            descriptor = torch.cat((
++                                torch.nn.functional.layer_norm(working, (values.shape[-1],), eps=1e-5),
++                                torch.nn.functional.layer_norm(hops[1].to(working.dtype) - working,
++                                                               (values.shape[-1],), eps=1e-5)), dim=-1)
++                            old_logits = torch.nn.functional.linear(
++                                descriptor, graph_filter.coefficient_gate.weight.to(working.dtype))
++                            energy_logits = torch.nn.functional.linear(
++                                energy, graph_filter.energy_gate.weight.to(working.dtype))
++                            old_routed = old_logits.tanh()
++                            without_energy = (graph_filter._static_coefficients().to(working.dtype)
++                                + graph_filter.conditioning_scale / 2
++                                * (old_routed - old_routed.mean(dim=-1, keepdim=True)))
++                        self.layers[name]['energy_diagnostics'][head].append({
++                            'energy_features': energy.cpu().numpy().copy(),
++                            'energy_gate_logits': energy_logits.cpu().numpy().copy(),
++                            'coefficients_without_energy': without_energy.cpu().numpy().copy(),
++                        })
+                 else:
+                     effective = graph_filter.coefficient_values(values)
+                 coefficients = effective.detach().cpu().numpy().copy()
+@@ -306,6 +330,7 @@
+ 
+ def coefficient_conditioning_figures(writer, capture, sample_ids, labels, partition):
+     """Save coefficients with explicit trial/head/(token)/(feature)/hop axes."""
++    from agfl.attention.agfl.layer import TOKEN_CONDITIONING, TOKEN_ENERGY_EPS
+     if not capture.layers:
+         return None
+     sample_ids = np.asarray(sample_ids, dtype=str)
+@@ -317,7 +342,7 @@
+         module = state['module']
+         conditioning = module.options.get('coefficient_conditioning', 'static')
+         feature_local = conditioning == 'feature_contrast'
+-        token_local = conditioning in {'token_contrast', 'feature_contrast'}
++        token_local = conditioning in TOKEN_CONDITIONING
+         per_head = []
+         for batches, id_batches in zip(state['coefficients'], state['sample_ids']):
+             if not batches or not np.array_equal(np.concatenate(id_batches), sample_ids):
+@@ -379,6 +404,25 @@
+                     ], axis=1)
+                     if arrays[key].shape[:3] != effective.shape[:3] or not np.isfinite(arrays[key]).all():
+                         raise ValueError('Invalid token hop diagnostics or trial/token count mismatch')
++        if conditioning == 'token_energy':
++            energy_batches = state['energy_diagnostics']
++            if len(energy_batches) != effective.shape[1] or not all(energy_batches):
++                raise ValueError('Token-energy diagnostics are missing a head or batch')
++            for key in ('energy_features', 'energy_gate_logits', 'coefficients_without_energy'):
++                arrays[key] = np.stack([
++                    np.concatenate([batch[key] for batch in batches], axis=0)
++                    for batches in energy_batches
++                ], axis=1)
++                expected = (*effective.shape[:3], 2) if key == 'energy_features' else effective.shape
++                if arrays[key].shape != expected or not np.isfinite(arrays[key]).all():
++                    raise ValueError('Invalid token-energy diagnostic shape or values')
++            if np.any(np.abs(arrays['energy_features']) > 1 + tolerance):
++                raise ValueError('Token-energy descriptors exceed their bounds')
++            arrays['energy_gate_weights'] = np.stack([
++                item.energy_gate.weight.detach().cpu().numpy() for item in module.filters])
++            if not np.isfinite(arrays['energy_gate_weights']).all():
++                raise ValueError('Nonfinite token-energy gate weights')
++            arrays['energy_coefficient_effect'] = effective.astype(np.float64) - arrays['coefficients_without_energy']
+         np.savez_compressed(writer.root / array_path, **arrays)
+         heads = []
+         for head in range(effective.shape[1]):
+@@ -399,6 +443,18 @@
+                 'gate_frobenius_norm': float(np.linalg.norm(gates[head])),
+                 'gate_learnable': module.filters[head].coefficient_gate.weight.requires_grad,
+             })
++            if conditioning == 'token_energy':
++                features = arrays['energy_features'][:, head]
++                effect = arrays['energy_coefficient_effect'][:, head]
++                heads[-1].update({
++                    'energy_gate_weights': arrays['energy_gate_weights'][head].tolist(),
++                    'energy_gate_frobenius_norm': float(np.linalg.norm(arrays['energy_gate_weights'][head])),
++                    'energy_gate_learnable': module.filters[head].energy_gate.weight.requires_grad,
++                    'energy_features_mean': features.mean(axis=(0, 1)).tolist(),
++                    'energy_features_std': features.std(axis=(0, 1)).tolist(),
++                    'energy_coefficient_effect_mean_absolute': np.abs(effect).mean(axis=(0, 1)).tolist(),
++                    'energy_coefficient_effect_max_absolute': float(np.abs(effect).max()),
++                })
+             if token_local:
+                 # Per-token summaries average features only for the new mode;
+                 # exact feature-resolved arrays and summaries remain available.
+@@ -479,6 +535,22 @@
+                 _feature_coefficient_heatmaps(writer, name, effective, bound_normalized, partition)
+             else:
+                 _token_coefficient_heatmaps(writer, name, effective, bound_normalized, partition)
++            if conditioning == 'token_energy':
++                layers[name].update({
++                    'energy_feature_names': ['relative_log_energy', 'centered_contrast_strength'],
++                    'energy_features_axes': ['trial', 'head', 'token', 'energy_feature'],
++                    'energy_gate_weights_axes': ['head', 'hop', 'energy_feature'],
++                    'energy_gate_logits_axes': ['trial', 'head', 'token', 'hop'],
++                    'coefficients_without_energy_axes': ['trial', 'head', 'token', 'hop'],
++                    'energy_coefficient_effect_axes': ['trial', 'head', 'token', 'hop'],
++                    'energy_descriptor_epsilon': float(TOKEN_ENERGY_EPS),
++                    'energy_note': 'Energy describes learned value-feature magnitudes, not EEG band power. '
++                                   'Descriptors center across tokens within each trial/head. '
++                                   'coefficients_without_energy removes only B*r at fixed saved graph/values; '
++                                   'energy_coefficient_effect is actual minus those coefficients. '
++                                   'It is not a retrained ablation, prediction difference or causal importance.',
++                })
++                _energy_routing_heatmaps(writer, name, arrays, partition)
+             continue
+         figure, axes = writer.plt.subplots(2, effective.shape[1], squeeze=False,
+                                           figsize=(4 * effective.shape[1], 7), constrained_layout=True)
+@@ -497,7 +569,8 @@
+                     f'Actual coefficients and bounded adjustments on the selected {partition} trials. '
+                     'Rows follow sample_ids in the accompanying NPZ and diagnostic manifest; these are not causal explanations.')
+     summary = {
+-        'schema_version': (3 if any(layer['coefficient_conditioning'] == 'feature_contrast' for layer in layers.values()) else
++        'schema_version': (4 if any(layer['coefficient_conditioning'] == 'token_energy' for layer in layers.values()) else
++                           3 if any(layer['coefficient_conditioning'] == 'feature_contrast' for layer in layers.values()) else
+                            2 if any(layer['coefficient_conditioning'] == 'token_contrast' for layer in layers.values()) else 1),
+         'partition': partition, 'sample_ids': sample_ids.tolist(),
+         'labels': labels.tolist(), 'layers': layers,
+@@ -509,6 +582,38 @@
+     }
+     write_json(writer.root / 'coefficient_conditioning.json', summary)
+     return summary
++
++
++def _energy_routing_heatmaps(writer, name, arrays, partition):
++    """Keep every trial/token in the new inputs and their coefficient effects."""
++    features, logits, effect = (arrays[key] for key in
++                               ('energy_features', 'energy_gate_logits', 'energy_coefficient_effect'))
++    for head in range(features.shape[1]):
++        figure, axes = writer.plt.subplots(1, 2, squeeze=False, figsize=(10, 4), constrained_layout=True)
++        for index, title in enumerate(('Relative log energy', 'Centered contrast strength')):
++            axis = axes[0, index]
++            artist = axis.imshow(features[:, head, :, index], aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
++            axis.set(title=f'Head {head}: {title}', xlabel='Destination token', ylabel='Diagnostic trial row')
++            figure.colorbar(artist, ax=axis)
++        writer.save(figure, f'filters/{slug(name)}_energy_inputs_head_{head}',
++                    f'Bounded router inputs on {partition} trials, centered within each trial/head before '
++                    'the energy tanh. Learned value magnitudes are not EEG band-power measurements.')
++        figure, axes = writer.plt.subplots(2, logits.shape[-1], squeeze=False,
++                                          figsize=(5 * logits.shape[-1], 7), constrained_layout=True)
++        for row, source, title in ((0, logits, 'Energy gate logit B*r'),
++                                   (1, effect, 'Coefficient change from B*r')):
++            bound = max(float(np.abs(source[:, head]).max()), 1e-12)
++            for hop in range(logits.shape[-1]):
++                axis = axes[row, hop]
++                artist = axis.imshow(source[:, head, :, hop], aspect='auto', cmap='RdBu_r',
++                                     vmin=-bound, vmax=bound)
++                axis.set(title=f'Head {head}, hop {hop}: {title}',
++                         xlabel='Destination token', ylabel='Diagnostic trial row')
++                figure.colorbar(artist, ax=axis)
++        writer.save(figure, f'filters/{slug(name)}_energy_effect_head_{head}',
++                    f'Energy-branch logits and actual-minus-without-energy hop coefficients on {partition} '
++                    'trials at the same graph and values. No weights are changed; this is not a retrained '
++                    'ablation or a prediction-level importance measure.')
+ 
+ 
+ def _feature_coefficient_heatmaps(writer, name, effective, normalized, partition):
+@@ -631,7 +736,7 @@
+         if conditioning != 'static':
+             caption = ('Learned AGFL base coefficients before trial-dependent adjustments. '
+                        'Actual per-trial coefficients are saved in coefficient_conditioning.json and its NPZ arrays.')
+-        if conditioning == 'token_contrast':
++        if conditioning in {'token_contrast', 'token_energy'}:
+             caption = ('Learned AGFL base coefficients before destination-token adjustments. '
+                        'Actual coefficients for every trial and token are saved in coefficient_conditioning.json '
+                        'and its NPZ arrays; these base values alone do not describe the routed filter.')
+@@ -649,7 +754,7 @@
+             'coefficient_conditioning_scale': float(module.options.get('coefficient_conditioning_scale', .5)) if conditioning != 'static' else None,
+             'coefficient_scope': ('sample_independent' if conditioning == 'static' else
+                                   'base_before_feature_adjustment' if conditioning == 'feature_contrast' else
+-                                  'base_before_token_adjustment' if conditioning == 'token_contrast' else
++                                  'base_before_token_adjustment' if conditioning in {'token_contrast', 'token_energy'} else
+                                   'base_before_trial_adjustment'),
+             'agfl_variant': module.options['agfl_variant'],
+             'filter_projection': module.options['filter_projection'],
+--- /dev/null
++++ b/tests/test_agfl_token_energy.py
+@@ -0,0 +1,157 @@
++"""Token-energy invariants; target-machine tests, never a launch prerequisite."""
++import pytest
++import torch
++
++from agfl.attention.agfl.layer import AGFL, GraphFilter, token_energy_features
++from tests.test_agfl_token_routing import nonzero_gate, settings
++
++
++def energy_filter(dim=3, **updates):
++    return GraphFilter(dim, settings(coefficient_conditioning='token_energy', **updates)).double()
++
++
++def activate_energy(module):
++    nonzero_gate(module)
++    with torch.no_grad():
++        w = torch.arange(module.energy_gate.weight.numel(), dtype=module.energy_gate.weight.dtype,
++                         device=module.energy_gate.weight.device)
++        module.energy_gate.weight.copy_(torch.cos(w * .7).reshape_as(module.energy_gate.weight) * .2)
++
++
++@pytest.mark.parametrize('variant', ['polynomial', 'renormalized'])
++@pytest.mark.parametrize('projection', ['none', 'shared', 'separate'])
++def test_energy_zero_init_preserves_token_function_rng_keys_and_shared_gradients(variant, projection):
++    options = settings(coefficient_conditioning='token_contrast', agfl_variant=variant,
++                       filter_projection=projection)
++    torch.manual_seed(319)
++    control = AGFL(options).double()
++    control_rng = torch.get_rng_state().clone()
++    torch.manual_seed(319)
++    candidate = AGFL({**options, 'coefficient_conditioning': 'token_energy'}).double()
++    assert torch.equal(torch.get_rng_state(), control_rng)
++    assert set(candidate.state_dict()) - set(control.state_dict()) == {
++        f'filters.{h}.energy_gate.weight' for h in range(4)}
++    assert sum(p.numel() for p in candidate.parameters()) - sum(p.numel() for p in control.parameters()) == 24
++    for name, value in control.state_dict().items():
++        torch.testing.assert_close(candidate.state_dict()[name], value, rtol=0, atol=0)
++    # Equivalence also holds when the original G has learned nonzero weights.
++    for original, new in zip(control.filters, candidate.filters):
++        nonzero_gate(original)
++        with torch.no_grad():
++            new.coefficient_gate.weight.copy_(original.coefficient_gate.weight)
++    x = torch.randn(2, 7, 32, dtype=torch.float64)
++    left, right = x.clone().requires_grad_(), x.clone().requires_grad_()
++    expected, actual = control(left), candidate(right)
++    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++    upstream = torch.randn_like(actual)
++    (expected * upstream).sum().backward()
++    (actual * upstream).sum().backward()
++    torch.testing.assert_close(left.grad, right.grad, rtol=1e-10, atol=1e-11)
++    for name, p in control.named_parameters():
++        gradient = dict(candidate.named_parameters())[name].grad
++        if p.grad is None:
++            assert gradient is None
++        else:
++            torch.testing.assert_close(gradient, p.grad, rtol=1e-10, atol=1e-11)
++    assert all(torch.isfinite(f.energy_gate.weight.grad).all()
++               and torch.count_nonzero(f.energy_gate.weight.grad) > 0 for f in candidate.filters)
++
++
++def test_energy_formula_and_signed_polynomial_match_independent_calculation():
++    module = energy_filter()
++    activate_energy(module)
++    v = torch.tensor([[[1., -2., .5], [4., .2, -1.], [-.1, 3., 2.]]], dtype=torch.float64)
++    a = torch.tensor([[[.6, .3, .1], [.2, .7, .1], [.1, .2, .7]]], dtype=torch.float64)
++    p1, p2 = a @ v, a @ (a @ v)
++    e, f = v.square().sum(-1) / 3, p1.square().sum(-1) / 3
++    log_e = (e + 1e-6).log()
++    c = (p1 - v).square().sum(-1) / 3 / (2 * (e + f) + 1e-6)
++    r = torch.stack(((log_e - log_e.mean(-1, keepdim=True)).tanh(),
++                     c - c.mean(-1, keepdim=True)), -1)
++    def normalize(x):
++        centered = x - x.mean(-1, keepdim=True)
++        return centered / (centered.square().mean(-1, keepdim=True) + 1e-5).sqrt()
++    d = torch.cat((normalize(v), normalize(p1 - v)), -1)
++    u = (d @ module.coefficient_gate.weight.T + r @ module.energy_gate.weight.T).tanh()
++    alpha = module.alpha_logits + .25 * (u - u.mean(-1, keepdim=True))
++    expected = sum(alpha[..., k, None] * p for k, p in enumerate((v, p1, p2)))
++    torch.testing.assert_close(token_energy_features(v, p1), r, rtol=1e-12, atol=1e-12)
++    torch.testing.assert_close(module.coefficient_values(v, a), alpha, rtol=1e-12, atol=1e-12)
++    torch.testing.assert_close(module(a, v), expected, rtol=1e-12, atol=1e-12)
++    delta = alpha - module.alpha_logits
++    assert delta.abs().max() <= 1/3 and delta.min() < 0 < delta.max()
++    torch.testing.assert_close(delta.sum(-1), torch.zeros_like(e), rtol=0, atol=1e-12)
++    assert r.abs().max() <= 1
++    # Centering occurs before energy tanh; only contrast is guaranteed zero mean afterward.
++    torch.testing.assert_close(r[..., 1].mean(-1), torch.zeros(1, dtype=torch.float64), atol=1e-12, rtol=0)
++
++
++@pytest.mark.parametrize('variant', ['polynomial', 'renormalized'])
++def test_energy_routing_is_trial_independent_token_equivariant_and_differentiable(variant):
++    torch.manual_seed(320)
++    module = energy_filter(agfl_variant=variant)
++    activate_energy(module)
++    v = torch.randn(2, 3, 3, dtype=torch.float64)
++    scores = torch.randn(2, 3, 3, dtype=torch.float64)
++    a = scores.softmax(-1)
++    expected = module(a, v)
++    changed = v.clone(); changed[1] *= 100
++    torch.testing.assert_close(module(a, changed)[:1], expected[:1], atol=1e-12, rtol=1e-12)
++    torch.testing.assert_close(module(a[:1], v[:1]), expected[:1], atol=1e-12, rtol=1e-12)
++    order = torch.tensor([2, 0, 1])
++    torch.testing.assert_close(module(a[:, order][:, :, order], v[:, order]), expected[:, order], atol=1e-12, rtol=1e-12)
++    assert torch.autograd.gradcheck(lambda x, s: module(s.softmax(-1), x),
++                                   (v.requires_grad_(), scores.requires_grad_()), atol=1e-5, rtol=1e-3)
++
++
++@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32, torch.float64])
++def test_energy_descriptor_zero_and_large_inputs_remain_finite(dtype):
++    v = torch.tensor([[[0., 0.], [60000., -60000.], [30000., -30000.]]], dtype=dtype, requires_grad=True)
++    first = -v
++    r = token_energy_features(v, first)
++    assert r.dtype == (torch.float64 if dtype == torch.float64 else torch.float32)
++    assert torch.isfinite(r).all() and r.abs().max() <= 1
++    r.square().sum().backward()
++    assert torch.isfinite(v.grad).all()
++    zero = torch.zeros(2, 3, 4, dtype=dtype, requires_grad=True)
++    output = token_energy_features(zero, zero)
++    torch.testing.assert_close(output, torch.zeros_like(output), rtol=0,
++                               atol=1e-12 if dtype == torch.float64 else 2e-6)
++    output.sum().backward()
++    assert torch.isfinite(zero.grad).all()
++
++
++def test_local_energy_detects_magnitude_and_constant_tokens_have_zero_descriptor():
++    v = torch.tensor([[[1., -1.], [2., -2.], [4., -4.]]], dtype=torch.float64)
++    r = token_energy_features(v, v)
++    assert r[0, 0, 0] < r[0, 1, 0] < r[0, 2, 0]
++    assert torch.count_nonzero(r[..., 1]) == 0
++    constant = v[:, :1].expand(-1, 3, -1)
++    torch.testing.assert_close(token_energy_features(constant, constant), torch.zeros_like(r), atol=1e-12, rtol=0)
++
++
++@pytest.mark.parametrize('update', [{'K': 0}, {'coefficient_activation': 'softmax'}, {'learnable_coefficients': False}])
++def test_energy_mode_rejects_incompatible_filter_settings(update):
++    with pytest.raises(ValueError, match='token_energy'):
++        energy_filter(**update)
++
++
++def test_energy_identity_graph_retains_the_zero_sum_constraint():
++    module = energy_filter()
++    activate_energy(module)
++    v = torch.randn(2, 4, 3, dtype=torch.float64)
++    a = torch.eye(4, dtype=torch.float64).expand(2, -1, -1)
++    torch.testing.assert_close(module(a, v), module.alpha_logits.sum() * v, atol=1e-12, rtol=1e-12)
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA unavailable')
++def test_energy_routing_cuda_amp_has_finite_backward():
++    model = AGFL(settings(coefficient_conditioning='token_energy')).cuda()
++    for f in model.filters:
++        activate_energy(f)
++    x = torch.randn(2, 7, 32, device='cuda', requires_grad=True)
++    with torch.autocast('cuda', dtype=torch.float16):
++        output = model(x)
++    output.float().square().mean().backward()
++    assert torch.isfinite(output).all() and torch.isfinite(x.grad).all()
++    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+--- /dev/null
++++ b/tests/test_agfl_token_energy_diagnostics.py
+@@ -0,0 +1,97 @@
++"""Saved token-energy inputs, effects and plots; target-machine checks only."""
++import json
++
++import numpy as np
++import pytest
++import torch
++
++from agfl.attention.agfl.layer import AGFL
++from agfl.visualization.diagnostics import coefficient_conditioning_figures, filter_figures
++from tests.test_agfl_token_diagnostics import TokenWriter, capture_tokens, token_values
++from tests.test_agfl_token_energy import activate_energy
++from tests.test_agfl_token_routing import settings
++
++
++@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
++@pytest.mark.parametrize('variant', ['polynomial', 'renormalized'])
++def test_energy_capture_saves_each_input_and_counterfactual_without_mutating_checkpoint(tmp_path, dtype, variant):
++    options = settings(dim=4, heads=2, top_k=None, coefficient_conditioning='token_energy', agfl_variant=variant)
++    model = torch.nn.ModuleDict({'attention': AGFL(options)}).to(dtype=dtype).eval()
++    with torch.no_grad():
++        model['attention'].qkv.weight.zero_()
++        model['attention'].qkv.bias.zero_()
++        model['attention'].qkv.weight[8:].copy_(torch.eye(4, dtype=dtype))
++        for item in model['attention'].filters:
++            activate_energy(item)
++    control = torch.nn.ModuleDict({'attention': AGFL({**options, 'coefficient_conditioning': 'token_contrast'})}).to(dtype=dtype).eval()
++    control.load_state_dict({name: value for name, value in model.state_dict().items() if '.energy_gate.' not in name})
++    values, ids, labels = token_values().to(dtype=dtype), ['z', 'a', 'q', 'b', 'm'], [0, 1, 2, 3, 0]
++    expected_features, expected_without = [], []
++    with torch.no_grad():
++        for head, f in enumerate(control['attention'].filters):
++            v = values[..., head * 2:(head + 1) * 2]
++            a = torch.full((5, 3, 3), 1/3, dtype=dtype)
++            one = a @ v
++            if variant == 'renormalized':
++                one = one * (v.norm(dim=-1, keepdim=True) / (one.norm(dim=-1, keepdim=True) + 1e-6))
++            # Independent NumPy descriptor from the known V and first hop.
++            v_np, p_np = v.numpy().astype(float), one.numpy().astype(float)
++            e, p = (v_np ** 2).mean(-1), (p_np ** 2).mean(-1)
++            log_e = np.log(e + 1e-6)
++            strength = ((p_np - v_np) ** 2).mean(-1) / (2 * (e + p) + 1e-6)
++            expected_features.append(np.stack((np.tanh(log_e - log_e.mean(-1, keepdims=True)),
++                                               strength - strength.mean(-1, keepdims=True)), -1))
++            expected_without.append(f.coefficient_values(v, first_hop=one).numpy())
++        expected_output = model['attention'](values).clone()
++    before = {name: value.clone() for name, value in model.state_dict().items()}
++    rng = torch.get_rng_state().clone()
++    capture = capture_tokens(model, values, ids)
++    writer = TokenWriter(tmp_path)
++    summary = coefficient_conditioning_figures(writer, capture, ids, labels, 'validation')
++    assert summary['schema_version'] == 4
++    assert json.loads(json.dumps(summary, allow_nan=False)) == summary
++    layer = summary['layers']['attention']
++    assert layer['coefficient_array_axes'] == ['trial', 'head', 'token', 'hop']
++    assert layer['energy_feature_names'] == ['relative_log_energy', 'centered_contrast_strength']
++    assert layer['energy_gate_weights_axes'] == ['head', 'hop', 'energy_feature']
++    assert type(layer['energy_descriptor_epsilon']) is float
++    with np.load(tmp_path / layer['array_file'], allow_pickle=False) as z:
++        np.testing.assert_array_equal(z['sample_ids'], ids)
++        np.testing.assert_allclose(z['energy_features'], np.stack(expected_features, 1), atol=2e-6, rtol=1e-6)
++        np.testing.assert_allclose(z['coefficients_without_energy'], np.stack(expected_without, 1), atol=2e-6)
++        expected_logits = np.einsum('bhti,hki->bhtk', z['energy_features'], z['energy_gate_weights'])
++        np.testing.assert_allclose(z['energy_gate_logits'], expected_logits, atol=2e-6)
++        np.testing.assert_allclose(z['energy_coefficient_effect'], z['effective_coefficients'] - z['coefficients_without_energy'], atol=2e-7)
++        assert z['energy_coefficient_effect'].shape == (5, 2, 3, 3)
++        assert np.abs(z['energy_coefficient_effect']).max() > .001
++        np.testing.assert_allclose(z['energy_coefficient_effect'].sum(-1), 0, atol=2e-6)
++        for head in range(2):
++            assert layer['heads'][head]['energy_gate_frobenius_norm'] > 0
++            assert layer['heads'][head]['energy_coefficient_effect_max_absolute'] > .001
++            np.testing.assert_allclose(writer.axes[2 + 2*head][0, 0].imshow.call_args.args[0],
++                                       z['energy_features'][:, head, :, 0])
++            np.testing.assert_allclose(writer.axes[3 + 2*head][1, 1].imshow.call_args.args[0],
++                                       z['energy_coefficient_effect'][:, head, :, 1])
++    assert len(writer.figures) == 6
++    assert sum('_energy_inputs_' in f['name'] for f in writer.figures) == 2
++    assert sum('_energy_effect_' in f['name'] for f in writer.figures) == 2
++    assert filter_figures(writer, model)['attention']['coefficient_scope'] == 'base_before_token_adjustment'
++    for name, value in model.state_dict().items():
++        torch.testing.assert_close(value, before[name], atol=0, rtol=0)
++    assert torch.equal(torch.get_rng_state(), rng)
++    assert all(p.grad is None for p in model.parameters())
++    with torch.no_grad():
++        torch.testing.assert_close(model['attention'](values), expected_output, atol=0, rtol=0)
++
++
++def test_zero_energy_gate_is_reported_as_zero_effect(tmp_path):
++    model = torch.nn.ModuleDict({'attention': AGFL(settings(dim=4, heads=2, coefficient_conditioning='token_energy'))}).double().eval()
++    ids = ['a', 'b', 'c', 'd', 'e']
++    capture = capture_tokens(model, token_values(), ids)
++    writer = TokenWriter(tmp_path)
++    summary = coefficient_conditioning_figures(writer, capture, ids, [0, 1, 2, 3, 0], 'validation')
++    layer = summary['layers']['attention']
++    with np.load(tmp_path / layer['array_file'], allow_pickle=False) as z:
++        assert not np.count_nonzero(z['energy_gate_logits'])
++        assert not np.count_nonzero(z['energy_coefficient_effect'])
++    assert all(h['energy_gate_frobenius_norm'] == 0 for h in layer['heads'])
+--- /dev/null
++++ b/tests/test_eegnet_energy_comparison.py
+@@ -0,0 +1,102 @@
++"""Energy-routing experiment identity, pairing, capacity and replay contracts."""
++from copy import deepcopy
++import json
++
++import numpy as np
++import pytest
++import torch
++
++from agfl.analysis import analyze_results, attention_display_name
++from agfl.config import comparison_identity, experiment_identity, merge, resolve_experiments
++from agfl.datasets import load_dataset
++from agfl.engine import evaluate_saved_checkpoint, run_experiment
++from agfl.models import get_model_spec
++from agfl.presets import load_preset
++from tests.test_analysis import save_run
++from tests.test_eegnet_conditioning_comparison import save_comparison
++from tests.test_training_ema import tiny_ema_config
++
++
++def test_energy_preset_retains_recipe_and_controls_with_only_24_added_weights():
++    old, new = load_preset('eegnet-a03-token-agfl'), load_preset('eegnet-a03-token-energy')
++    assert new['base'] == {**old['base'], 'output_dir': 'results/eegnet-A03-token-energy-v1'}
++    assert [new['experiments'][0], *new['experiments'][2:]] == old['experiments'][1:]
++    expected = deepcopy(old['experiments'][1])
++    expected['attention_options']['coefficient_conditioning'] = 'token_energy'
++    assert new['experiments'][1] == expected
++    configs = [resolve_experiments(merge(new['base'], arm))[0] for arm in new['experiments']]
++    assert len({comparison_identity(c) for c in configs}) == 1
++    assert len({experiment_identity(c) for c in configs}) == 4
++    assert sum(len(c['seeds']) for c in configs) == 20
++    assert {c['subject_id'] for c in configs} == {'A03'}
++    assert all(c['training']['epochs'] == 250 and 'sam_rho' not in c['training'] for c in configs)
++    metadata = {'channels': 22, 'samples': 1000, 'num_classes': 4, 'modality': 'eeg'}
++    counts = []
++    for config in configs:
++        model = get_model_spec('eegnet').build(config['model_options'], metadata, config['attention'], config['attention_options'])
++        counts.append(sum(p.numel() for p in model.parameters()))
++        assert model.num_tokens == 7
++    assert counts == [8244, 8268, 8036, 8260]
++
++
++def test_energy_report_pairs_original_token_and_baselines_on_exact_splits(tmp_path):
++    ids = {}
++    for seed in range(3):
++        for name, attention, score, options in [
++            ('token', 'agfl', .81, {'coefficient_conditioning': 'token_contrast'}),
++            ('energy', 'agfl', .82, {'coefficient_conditioning': 'token_energy'}),
++            ('mha', 'mha', .83, {}), ('linformer', 'linformer', .84, {'projection_rank': 4}),
++        ]:
++            record = save_comparison(tmp_path / 'runs', name, attention, seed, score, options=options,
++                                      split='unmatched' if name == 'token' and seed == 2 else None)
++            ids[name] = record['experiment_id']
++    result = analyze_results(tmp_path / 'runs', tmp_path / 'report')
++    rows = [r for r in result['comparisons'] if r['agfl_experiment_id'] == ids['energy']]
++    assert len(rows) == 9 and len(result['experiments']) == 4
++    expected = {ids['token']: (2, .01), ids['mha']: (3, -.01), ids['linformer']: (3, -.02)}
++    for row in rows:
++        n, delta = expected[row['baseline_experiment_id']]
++        assert row['n_pairs'] == n and row['mean_delta'] == pytest.approx(delta)
++        assert row['agfl_label'] == 'AGFL (token energy routing, scale 0.5)'
++        assert row['comparison_kind'] == ('coefficient_conditioning' if row['baseline'] == 'agfl' else 'attention')
++    assert attention_display_name('agfl', {'coefficient_conditioning': 'token_contrast'}) == 'AGFL (token routing, scale 0.5)'
++
++
++@pytest.mark.parametrize('change', ['scale', 'graph', 'training', 'backbone', 'data', 'source'])
++def test_energy_ablation_rejects_other_changes(tmp_path, change):
++    control = save_comparison(tmp_path / 'runs', 'token', 'agfl', 0, .8,
++                              options={'coefficient_conditioning': 'token_contrast'})
++    config = deepcopy(control['config'])
++    config['attention_options']['coefficient_conditioning'] = 'token_energy'
++    if change == 'scale': config['attention_options']['coefficient_conditioning_scale'] = .25
++    elif change == 'graph': config['attention_options']['top_k'] = 3
++    elif change == 'training': config['training']['learning_rate'] *= 2
++    elif change == 'backbone': config['model_options']['temp_kernel'] *= 2
++    elif change == 'data': config['data']['window'] = 900
++    else: config['provenance'] = {'source_sha256': 'other'}
++    save_run(tmp_path / 'runs' / 'energy', 'agfl', 0, .9,
++             **{key: config[key] for key in ('attention_options', 'model_options', 'training', 'data', 'subject_id')},
++             **({'provenance': config['provenance']} if 'provenance' in config else {}))
++    assert analyze_results(tmp_path / 'runs', tmp_path / 'report')['comparisons'] == []
++
++
++def test_energy_checkpoint_replays_selected_predictions_with_strict_state_loading(tmp_path):
++    config = tiny_ema_config(tmp_path, decay=0)
++    config['training'].update(epochs=2, checkpoint_tiebreaker='none')
++    config['attention'] = 'agfl'
++    config['attention_options'].update(projection='qkv', qkv_bias=True, filter_projection='none',
++        coefficient_init='one_hop', score_scaling='sqrt_dim', coefficient_conditioning='token_energy')
++    result = run_experiment(config)[0]
++    path = next((tmp_path / 'results' / 'artifacts').rglob('result.json'))
++    checkpoint_bytes = path.with_name('checkpoint.pt').read_bytes()
++    checkpoint = torch.load(path.with_name('checkpoint.pt'), map_location='cpu', weights_only=False)
++    assert any('.energy_gate.weight' in name for name in checkpoint['model'])
++    with np.load(path.with_name('predictions.npz'), allow_pickle=False) as z:
++        saved = {k: z[k].copy() for k in z.files}
++    bundle = load_dataset(result['config']['dataset'], result['config']['data'])
++    split = json.loads(path.with_name('split.json').read_text())
++    replay = evaluate_saved_checkpoint(deepcopy(result['config']), bundle, split, path.parent)
++    assert replay['validation'] == result['validation'] and replay['test'] == result['test']
++    with np.load(path.with_name('predictions.npz'), allow_pickle=False) as z:
++        for key, value in saved.items(): np.testing.assert_array_equal(z[key], value)
++    assert path.with_name('checkpoint.pt').read_bytes() == checkpoint_bytes

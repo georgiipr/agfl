@@ -13,124 +13,22 @@ from agfl.config import digest, merge, resolve_experiments
 from agfl.presets import load_preset
 
 
+# New runs search only electrode graphs. Historical temporal candidate source
+# and original presets are archived; names are not silently reinterpreted.
 CANDIDATES = {
-    'spatial_control': {
-        'data': {'normalization': 'train_channel'},
-        'model_options': {'temp_kernel': 32, 'f1': 16, 'f2': 32, 'pk1': 8, 'pk2': 16,
-                          'batch_norm_momentum': .1, 'batch_norm_eps': 1e-5,
-                          'attention_dropout': 0., 'initialization': 'pytorch'},
-        'training': {'batch_size': 64, 'learning_rate': .005, 'weight_decay': .001,
-                     'loss': 'focal', 'class_weights': 'balanced', 'focal_gamma': 3.,
-                     'checkpoint_criterion': 'accuracy', 'gradient_clip': None,
-                     'min_lr_ratio': 0., 'early_stopping_patience': 0},
-    },
-    'compact_train_channel': {'data': {'normalization': 'train_channel'}},
-    'compact_trialnorm': {},
-    'compact_recombine': {'training': {'augmentation': {'recombine_segments': 8}}},
-    'compact_recombine_slow': {'training': {'learning_rate': .0005,
-                                          'augmentation': {'recombine_segments': 8}}},
+    'electrode_control': {},
+    'electrode_dense': {'attention_options': {'top_k': None}},
+    'electrode_top8': {'attention_options': {'top_k': 8}},
 }
-
-# Preserve the original five-candidate search and its resumable plan. Follow-up
-# candidates are opt-in so adding one does not expand existing launch commands.
 DEFAULT_CANDIDATES = tuple(CANDIDATES)
-CANDIDATES['spatial_recombine'] = merge(
-    CANDIDATES['spatial_control'],
-    {'training': {'augmentation': {'recombine_segments': 8, 'recombine_probability': .5}}},
-)
-# A06 seed 0 has 133 training trials: 48/48/37 instead of 64/64/5,
-# retaining every trial and the same three optimizer steps per epoch.
-CANDIDATES['spatial_batch48'] = merge(
-    CANDIDATES['spatial_control'],
-    {'training': {'batch_size': 48}},
-)
-# Improve AGFL's graph/filter parameterization while keeping EEGNet, data and
-# training fixed. The dense variant starts with the standard MHA computation;
-# the other two isolate pruning, then norm-preserving propagation.
-CANDIDATES['spatial_qkv_dense'] = merge(
-    CANDIDATES['spatial_control'],
-    {'attention_options': {
-        'projection': 'qkv', 'qkv_bias': True, 'filter_projection': 'none',
-        'score_scaling': 'sqrt_dim', 'coefficient_init': 'one_hop',
-        'coefficient_activation': 'identity', 'agfl_variant': 'polynomial',
-        'learnable_coefficients': True, 'K': 2, 'top_k': None,
-        'graph_normalization': 'softmax',
-    }},
-)
-CANDIDATES['spatial_qkv_sparse'] = merge(
-    CANDIDATES['spatial_qkv_dense'],
-    {'attention_options': {'top_k': 'scheduled'}},
-)
-CANDIDATES['spatial_qkv_renorm'] = merge(
-    CANDIDATES['spatial_qkv_sparse'],
-    {'attention_options': {'agfl_variant': 'renormalized', 'hop_normalization': 'feature'}},
-)
-# A03 follow-up: isolate a three-neighbor cutoff against the existing scheduled
-# cutoff (five of seven time tokens here). Preserve the same tie policy, QKV,
-# filter order, initialization, backbone and training settings in both arms.
-CANDIDATES['spatial_qkv_top3'] = merge(
-    CANDIDATES['spatial_qkv_sparse'],
-    {'attention_options': {'top_k': 3}},
-)
-# A03 refinement: a 2x2 comparison of learned temperature initialization and
-# filter-tap initialization. Keep spatial_qkv_sparse as the separate fixed-scale
-# control: a learnable temperature initialized to 1 is a new training choice.
-CANDIDATES['spatial_qkv_temp1'] = merge(
-    CANDIDATES['spatial_qkv_sparse'],
-    {'attention_options': {'score_scaling': 'temperature', 'temperature_init': 1.}},
-)
-CANDIDATES['spatial_qkv_temp05'] = merge(
-    CANDIDATES['spatial_qkv_temp1'],
-    {'attention_options': {'temperature_init': .5}},
-)
-CANDIDATES['spatial_qkv_identity_temp1'] = merge(
-    CANDIDATES['spatial_qkv_temp1'],
-    {'attention_options': {'coefficient_init': 'identity_one_hop'}},
-)
-CANDIDATES['spatial_qkv_identity_temp05'] = merge(
-    CANDIDATES['spatial_qkv_temp05'],
-    {'attention_options': {'coefficient_init': 'identity_one_hop'}},
-)
-
-# Capacity study: retain 15 time tokens (1000 // 8 // 8), with trainable
-# per-hop feature maps initialized to identity. Cross the two losses with
-# two learning rates without changing data, splits, or the epoch budget.
-# This is a joint architecture/training study, not an isolated pooling or
-# projection ablation. The unchanged control comes first for exact ties.
-CANDIDATES['spatial_qkv_capacity_focal_005'] = merge(
-    CANDIDATES['spatial_qkv_sparse'],
-    {'model_options': {'pk2': 8},
-     'attention_options': {'filter_projection': 'separate',
-                           'filter_projection_init': 'identity'}},
-)
-CANDIDATES['spatial_qkv_capacity_focal_001'] = merge(
-    CANDIDATES['spatial_qkv_capacity_focal_005'],
-    {'training': {'learning_rate': .001}},
-)
-CANDIDATES['spatial_qkv_capacity_ce_005'] = merge(
-    CANDIDATES['spatial_qkv_capacity_focal_005'],
-    {'training': {'loss': 'cross_entropy'}},
-)
-CANDIDATES['spatial_qkv_capacity_ce_001'] = merge(
-    CANDIDATES['spatial_qkv_capacity_ce_005'],
-    {'training': {'learning_rate': .001}},
-)
-CANDIDATE_SETS = {
-    'capacity': (
-        'spatial_qkv_sparse',
-        'spatial_qkv_capacity_focal_005',
-        'spatial_qkv_capacity_focal_001',
-        'spatial_qkv_capacity_ce_005',
-        'spatial_qkv_capacity_ce_001',
-    ),
-}
+CANDIDATE_SETS = {'electrode_sparsity': DEFAULT_CANDIDATES}
 
 
 def search_configs(data_dir, output_dir, subjects, seeds, candidates=None, epochs=None):
     names = list(DEFAULT_CANDIDATES) if candidates is None else list(candidates)
     if not names or len(set(names)) != len(names) or set(names) - CANDIDATES.keys():
         raise ValueError(f'Choose unique EEGNet candidates from {list(CANDIDATES)}')
-    base = load_preset('eegnet-bci2a')
+    base = load_preset('eegnet-interchannel')
     base.update(output_dir=str(output_dir), seeds=list(seeds))
     base['data'].update(data_dir=str(data_dir), subjects=list(subjects))
     if epochs is not None:

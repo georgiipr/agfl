@@ -1,3 +1,5 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # Refine AGFL graph weights and local feature retention on A03
 
 **Completed study:** the validation-selected procedure reached 85.56% mean

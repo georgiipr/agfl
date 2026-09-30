@@ -4,9 +4,10 @@ Select a **model** (EEGNet, EEGEncoder, DSTS EEGEncoder or Conformer) and an
 independent **attention mechanism**. The selected attention runs inside that
 model. Every model owns separate EEG and ECG variants.
 
-This is a source refactor prepared for the experiment machine. No project code,
-training, evaluation, installation or tests have been run locally. Numerical
-verification and repeated-seed research results remain pending.
+The current EEG architecture preserves electrode identity until attention;
+ECG attention remains temporal. This revision was checked statically only.
+No project code, training, inference or tests were run locally. New accuracy
+and numerical behavior remain unverified until the cluster run.
 
 ## Results to download
 
@@ -19,20 +20,20 @@ settings, split/selection records and troubleshooting evidence) from
 For a completed existing folder, run on the cluster:
 
 ```bash
-python main.py organize-results results/eegnet-A03-agfl-qkv-v2
+python main.py organize-results results/eegnet-A03-interchannel-v1
 ```
 
 If checkpoint plots are still needed, and the checkout matches the saved model:
 
 ```bash
-python main.py diagnose-session results/eegnet-A03-agfl-qkv-v2 \
+python main.py diagnose-session results/eegnet-A03-interchannel-v1 \
   --device cuda --partition validation --embedding tsne
 ```
 
 Then refresh the result plots and tables:
 
 ```bash
-python main.py analyze results/eegnet-A03-agfl-qkv-v2 --plots
+python main.py analyze results/eegnet-A03-interchannel-v1 --plots
 ```
 
 Keep a running study's checkout and folders stable until it finishes. For an
@@ -51,7 +52,10 @@ change metrics or rewrite saved configurations. See the
 | Model settings | `model_options`: the chosen backbone's convolutions, widths, depth and dropout |
 | Attention settings | `attention_options`: heads, AGFL K/Top-k, approximation rank, etc. |
 
-`mha` means vanilla multi-head self-attention. `signal_transformer` is the
+`mha` defaults to vanilla multi-head self-attention. Explicit
+`attention_options.output_gate=true` selects its gated control for EEG or ECG.
+`temporal_bias=true` is allowed only on temporal tokens; it is rejected for EEG.
+Reports label these variants separately. `signal_transformer` is the
 explicit generic backbone used by earlier framework runs; those runs were
 incorrectly named after their attention mechanisms. They are never presented
 as EEGNet results. There are no selectable archived model adapters or
@@ -91,12 +95,11 @@ The factory inserts the chosen mechanism at the model's attention locations
 and isolates initialization RNG so attention capacity does not shift common
 backbone weights. Splits and training policy are shared.
 
-EEG uses electrode tokens and learned spatial readouts by default; ECG uses time tokens. These adaptations
+EEG requires electrode tokens and learned spatial readouts; ECG uses time tokens. These adaptations
 change surrounding feature extraction and readout where needed. See
 [model structure and architecture changes](docs/model_attention_structure.md).
 Preserving AGFL's equations does not imply full-original-backbone parity.
-The targeted `eegnet-bci2a` preset below instead applies EEGNet's spatial
-convolution across all electrodes first, followed by AGFL over time.
+Temporal EEG presets are retired. See the [inter-channel contract](docs/eeg_interchannel.md).
 
 ## Launch on the experiment machine
 
@@ -121,9 +124,9 @@ salloc -p gpu --gpus=1 --mem=10G -N 1 -n 1 -c 4 --time=04:00:00 \
 ```
 
 Wait until the allocation is granted before continuing. The current
-[A03 EEGNet token-routing comparison](docs/eegnet_agfl_token_routing.md) runs training,
-checkpoint diagnostics and result plots with one command. Separate plotting
-commands are also provided for recovery. No `.sbatch` file or development
+[inter-channel EEGNet guide](docs/eeg_interchannel.md) provides separate training,
+checkpoint-diagnostic and result-plot commands. `--report` optionally generates
+both plot families automatically after training. No `.sbatch` file or development
 test run is required.
 
 Activate your existing environment in each new cluster shell. For the environment
@@ -154,8 +157,7 @@ bar showing the model, attention, subject, seed, elapsed time, estimated remaini
 time, training loss, training accuracy and validation accuracy. It leaves one
 completed bar per run instead of printing a line every epoch. Bars are disabled
 automatically when stderr is redirected (for example, to a batch-job log).
-All epoch metrics are still saved to `history.json`. The `tqdm` dependency is
-installed by the package installation command above.
+All epoch metrics are still saved to `history.json`. The existing environment supplies `tqdm`.
 
 A short execution check with one subject and one seed (not an accuracy study):
 
@@ -190,465 +192,115 @@ Paths resolve from the launch directory. Override `data.data_dir` for another
 location. EEG E-session evaluation also requires official `AxxE.mat` labels;
 labels are never inferred. ECG selects MLII by name and records missing leads.
 
-## Improve EEGNet + AGFL on BCI IV 2a
+## Current EEG experiment: inter-channel EEGNet
 
-**Current priority: restore the previous EEGNet and improve AGFL only.**
-The failed power/EMA recipe is withdrawn from the active comparison. EEGNet
-again uses its original convolution path, 32-sample temporal kernel and seven
-time tokens; training again uses learning rate 0.005, focal gamma 3, no
-augmentation, no EMA and the original checkpoint tie rule. Preprocessing is
-unchanged. The new AGFL option learns a token-specific mixture of existing
-graph hops from each token and its neighborhood contrast. The
-[token-routing workflow](docs/eegnet_agfl_token_routing.md) documents the exact
-formula, rollback, comparison and commands. No dependencies are added.
+The current queued experiment compares **base AGFL and MHA across all five EEG
+models on A03, A04 and A09**, five seeds each: **150 fits**. Submit the single
+[`eeg_A03_A04_A09_accuracy.sbatch`](eeg_A03_A04_A09_accuracy.sbatch) file from the
+updated cluster checkout. The [queued accuracy guide](docs/eeg_three_subject_accuracy.md)
+contains the changed-file upload, submission and single-CSV download commands.
+It verifies 22-electrode attention inputs on the cluster, averages seeds then
+subjects equally, and writes `report/accuracy_table.csv`. This requested run
+generates **no plots or checkpoint files**; selected weights stay in memory
+until test evaluation. No plotting commands or test-suite prerequisites apply.
+If the 24-hour allocation is insufficient, use the separate
+[`eeg_A03_A04_A09_continue.sbatch`](eeg_A03_A04_A09_continue.sbatch) file to
+retain completed matching fits and finish the original study. The guide includes
+upload and dependent-submission commands. Keep the original `agfl/` source and
+environment unchanged throughout; the fresh-launch file retrains all 150 fits.
 
-From the cluster `AGFL` directory, with the existing environment and GPU
-allocation active and `../ml/A03T.gdf` available, launch everything once:
+For the focused **Conformer-only** comparison, use
+[`conformer_A03_A04_A09_attentions.sbatch`](conformer_A03_A04_A09_attentions.sbatch):
+base AGFL, MHA and Performer on A03/A04/A09, five seeds each (**45 fits**).
+This single file includes automatic continuation and writes an accuracy table
+without plots or checkpoints. The [Conformer guide](docs/conformer_three_subject_attentions.md)
+contains the one-file upload, submission, continuation and table-download commands.
 
-```bash
-python main.py sweep --preset eegnet-a03-token-agfl \
-  --output-dir results/eegnet-A03-token-agfl-v1 \
-  --report
-```
+The next focused comparison uses **Signal Transformer** with the same three
+attentions, subjects and seeds (**45 fits**). Upload only
+[`signal_transformer_A03_A04_A09_attentions.sbatch`](signal_transformer_A03_A04_A09_attentions.sbatch).
+Its [experiment guide](docs/signal_transformer_three_subject_attentions.md)
+includes submission, log monitoring, continuation and CSV-download commands.
+Both Transformer blocks operate on 22 electrode tokens.
 
-This is **one command, 20 fits**: static sparse AGFL, token-routed sparse AGFL,
-MHA and Linformer rank 4, each on A03 with seeds 0–4 and 250 epochs. The two
-AGFL arms differ only in coefficient routing; its 192 new parameters start
-with zero correction. Every method shares the restored EEGNet, training,
-preprocessing and per-seed splits. Validation accuracy selects one checkpoint
-per method; every selected checkpoint receives test results. The report
-compares token-routed AGFL with static AGFL and both attention baselines and
-records each class's recall, so feet gains cannot hide tongue/hand losses.
+**All new EEG attention graphs operate across electrodes.** ECG attention
+continues to operate over time. The earlier EEG temporal studies are archived;
+their accuracy and seven-node graphs are not electrode-graph results.
 
-`--report` is reusable with **`run`, `sweep` and `tune-eegnet`**. It generates
-validation checkpoint diagnostics with t-SNE, then runs result analysis with
-plots. It uses each session's first configured training device (and announces
-that choice for a mixed-device session). It does nothing with `--dry-run`.
-Without `--report`, the existing separate plotting workflow remains available.
-For `run` and `sweep`, add `--skip-completed` when resuming; provenance and
-settings must match for completed runs to be reused. `tune-eegnet`
-already reuses matching completed candidates by default. Incomplete fits
-restart from epoch 1. Keep the source, configuration and environment stable
-throughout the study, and use the fresh output directory above.
+EEGNet now preserves its full-channel depthwise spatial convolution before ELU
+and pooling, retaining 224 classifier features for a 1000-sample trial. A parallel
+branch encodes each electrode separately, applies the chosen attention to
+`[batch, 22, 32]`, and contributes another 32 features to the classifier.
+Both branches share the first temporal convolution; AGFL and MHA use the same
+backbone. Every attention head has a 22×22 electrode graph. Changing to
+`attention_axis=time` or enabling `temporal_bias` for EEG is rejected before
+training. Temporal convolutions inside a single electrode remain part of its
+feature extractor.
 
-If automatic reporting is interrupted, completed training is retained. Recover
-checkpoint plots without retraining:
+The [complete inter-channel guide](docs/eeg_interchannel.md) contains normal-file
+upload commands, allocation/environment setup, a two-epoch check, single-subject
+training, the full nine-subject comparison, and every plotting command.
+No new libraries or local project execution are required.
 
-```bash
-python main.py diagnose-session results/eegnet-A03-token-agfl-v1 \
-  --device cuda --partition validation --embedding tsne
-```
-
-Then refresh result plots and tables:
-
-```bash
-python main.py analyze results/eegnet-A03-token-agfl-v1 --plots
-```
-
-Download **`results/eegnet-A03-token-agfl-v1/report/`** into a new local folder. Open
-`analysis/report.md` for accuracy summaries, `analysis/figures/index.md` for
-result plots, and each run's `index.md` below `diagnostics/` for checkpoint
-plots. `analysis/per_class.csv` and `analysis/per_class_summary.csv` give
-validation/test class metrics; figures include class recall histories and
-comparisons. Token-routed runs save `coefficient_conditioning.json` and
-per-trial/head/token/hop coefficient arrays and heatmaps under `filters/`.
-These expose routing variation, bounded corrections and the zero-sum
-constraint. Keep `artifacts/` on the cluster for diagnostic regeneration.
-There is no candidate-selection report in this fixed comparison. New accuracy
-gains remain unmeasured; **90% is a target**. A03 has been repeatedly inspected,
-so this remains development evidence.
-
-**Retired A03 power/EMA comparison:** AGFL averaged **77.04%**, MHA **76.30%**
-and Linformer rank 4 **76.67%**, below their prior original-EEGNet results.
-All 15 fits and 346 figure pairs completed; the power branch and EMA were
-active. The [power/EMA record](docs/eegnet_power_ema.md) preserves unfavorable
-results and reproduction commands. Its isolated reproduction classes keep
-old checkpoints inspectable; the active EEGNet has no power branch.
-
-**Completed A03 conditioning comparison:** original and conditioned AGFL
-both averaged **84.44%** test accuracy, versus **85.93%** for Linformer rank 4.
-Conditioning improved feet but reduced tongue recall; its controller was
-active and numerically finite. All 15 fits and 313 figure pairs completed.
-The [conditioning workflow](docs/eegnet_agfl_conditioning.md) preserves the
-implementation and reproduction commands. Static AGFL remains the reference.
-
-**Completed A03 capacity study:** the validation-selected procedure reached
-**84.44%** mean test accuracy (seed SD **3.10 percentage points**). The
-15-token/projected variants did not beat the seven-token sparse control's
-mean validation accuracy. The [single-file results review](docs/eegnet_a03_capacity_review.html)
-records the evidence; the [capacity workflow](docs/eegnet_agfl_capacity.md)
-preserves reproduction commands. It is no longer the next launch.
-
-**Completed A03 graph/filter refinement:** validation-selected test accuracy
-is **85.56%** (seed SD **2.03 percentage points**). The new temperature and
-coefficient initializations did not beat the sparse control's mean validation
-accuracy as fixed candidates. The [refinement workflow](docs/eegnet_agfl_refinement.md)
-preserves that experiment's settings and reproduction commands.
-
-**Completed A03 all-attention comparison:** fixed sparse AGFL averages
-**84.44%** test accuracy, MHA **85.56%**, Performer **84.44%**, Linformer
-rank 4/7 **85.93%/79.63%**, and Nyström landmarks 4/7 **51.48%/85.19%**.
-AGFL has the highest mean ROC-AUC (**0.9721**), but no accuracy advantage.
-All 35 runs and 691 PNG/PDF figure pairs completed. These fixed-setting results
-differ from the earlier validation-selected searches. The
-[all-attention workflow](docs/eegnet_a03_all_attentions.md) preserves that
-experiment's settings and reproduction commands.
-
-**Completed A03 sparsity check:** selecting between three-neighbor and
-five-neighbor Q/K/V AGFL again gave **85.56% mean test accuracy**, with
-**5.77 percentage points** seed SD. Top-three did not improve validation
-accuracy in any seed: four ties and one loss. The earlier three-candidate
-Q/K/V search also averaged 85.56%, equal to the historical MHA mean. These
-search results do not establish an AGFL advantage. The
-[Q/K/V and sparsity workflow](docs/eegnet_agfl_qkv_improvement.md) preserves
-the earlier experiment commands; they are not the next launch.
-
-The same improved AGFL module is available inside **all five backbones**.
-See [cross-model improvements and cluster checks](docs/agfl_cross_model_improvements.md)
-for the shared attention settings, backbone-specific heads/hop orders,
-whole-model initialization checks, and additional numerical safeguards.
-Coefficient-routing options live inside AGFL, independently of model choice.
-Current work remains on the restored EEGNet at the user's request.
-
-**Manuscript reference and comparison scope:** use the latest located
-`Downloads/NEU_art_submission.pdf` (4 May 2026), rather than the local TeX
-draft. The completed EEGNet comparison included **MHA, AGFL, Performer,
-Linformer and Nystromformer**, with four classes and separate subject
-training. The A03 five-attention comparison is complete; the next experiment
-compares static/token-routed AGFL, MHA and Linformer inside the restored
-EEGNet. See
-[the PDF reference and pilot rationale](docs/neurips_submission_reference.md).
-
-**Earlier fixed A03 attention comparison:** MHA averages **85.56% test accuracy**,
-AGFL **84.81%**, over five matched seeds. AGFL wins three seeds, ties one and
-loses one, for a mean difference of **−0.74 percentage points**. AGFL uses
-29.67% fewer parameters, but its saved run times are about 1.85 times longer
-in this seven-token configuration; these are not dedicated latency
-benchmarks. All **221 figures (442 PNG/PDF files)** are present. The
-[single-file review](docs/eegnet_a03_attention_review.html) includes comparison
-figures, integrity checks, a package-inventory caveat and the full-study
-commands. This pilot does not demonstrate AGFL superiority.
-
-**Latest A06 batch comparison:** batch 48 wins seed-0 validation by one trial
-(21/43 versus 20/43), but its selected checkpoint scores **25.58% test
-accuracy**, versus the previously evaluated control's **32.56%** on the same
-test IDs. Final training accuracy reaches 93.23%, while final validation
-accuracy is 41.86%; the reported test checkpoint was selected at epoch 25.
-This does not establish a fix for A06. All **27 figures (54 PNG/PDF files)**
-are present. The [single-file review with all embedded plots](docs/eegnet_a06_batch_review.html)
-documents the comparison, artifact checks and limits. No additional plot
-generation is needed for the downloaded batch-comparison folder.
-
-**Direct A06 inspection:** local GDF byte inspection confirms matching files,
-cue timing, validation labels and artifact exclusions. A06 has weak
-class-associated alpha-power differences in its small training partition;
-the code also gives all three tested A06 recipes a five-trial final batch
-with BatchNorm. Neither observation alone proves the cause of low accuracy.
-See [the direct findings and limits](docs/eegnet_a06_direct_findings.md).
-Another cluster audit is not needed to establish those recorded findings.
-
-**Reproduce the completed A06 batch-size experiment.** After updating the cluster checkout, run
-from `AGFL` with `../ml/A06T.gdf` available. This runs **two fits, one subject,
-seed 0, 250 epochs each**, comparing the existing `spatial_control` against
-`spatial_batch48`. Only batch size changes: A06's 133 training trials form
-48/48/37 batches instead of 64/64/5. All trials are retained and both recipes
-still take three optimizer steps per epoch. The model, attention, data split,
-preprocessing and other training settings stay the same. The new candidate
-is opt-in and does not expand the default five-candidate search.
-
-Train and select by validation; only the selected checkpoint is tested:
+The preceding focused EEGNet repair experiment uses **A03 only**, with **base AGFL and base MHA**, five
+seeds each, 250 epochs: **10 fits**. This tests the spatial-path repair against
+the strongest comparator from the preceding report. The classifier now receives
+256 features instead of forcing both mechanisms through a 32-feature bottleneck.
+The [repair guide](docs/eegnet_spatial_fusion.md) explains the diagnosed issues,
+exact architecture, changed-file upload, cluster setup and checkpoint compatibility.
+Base AGFL uses the original layer defaults: globally learned hop coefficients,
+split-input graph construction, learned temperature and separate hop projections.
+Its settings are identical to the base AGFL arm in the A03/A04 experiment.
+Base MHA has no added gate or temporal bias. Both arms use 22-electrode graphs
+and the same EEGNet backbone, preprocessing, training settings and per-seed splits.
+The improvement is a hypothesis to evaluate, not an already measured gain.
+Working directory is
+`/beegfs/home/georgii.promyslov/AGFL`, dataset is `../ml`, and the existing
+Python environment/GPU allocation must be active.
 
 ```bash
-python main.py tune-eegnet \
-  --data-dir ../ml \
-  --subjects 6 \
-  --seeds 0 \
-  --candidate spatial_control \
-  --candidate spatial_batch48 \
-  --output-dir results/eegnet-A06-batch-comparison
+python main.py sweep --preset eegnet-a03-spatial-fusion \
+  --output-dir results/eegnet-A03-spatial-fusion-v1
 ```
 
-Generate the selected checkpoint's signal, embedding and attention plots:
+Generate checkpoint plots, including electrode graphs and routing coefficients:
 
 ```bash
-python main.py diagnose-session results/eegnet-A06-batch-comparison \
-  --device cuda --partition validation --embedding tsne
+python main.py diagnose-session results/eegnet-A03-spatial-fusion-v1 \
+  --device cuda --partition validation --max-samples 64 --embedding pca
 ```
 
-Then generate the result plots and analysis tables:
+Generate result plots and accuracy tables:
 
 ```bash
-python main.py analyze results/eegnet-A06-batch-comparison --plots
+python main.py analyze results/eegnet-A03-spatial-fusion-v1 --plots
 ```
 
-Download only **`results/eegnet-A06-batch-comparison/report/`**. Candidate
-histories and the selection report compare validation performance; result plots
-describe the selected checkpoint. The plot indexes are
-`report/analysis/figures/index.md` and
-`report/diagnostics/selected/eeg/subject_A06/seed_0/index.md`.
-An identical training relaunch reuses completed matching candidates and
-restarts incomplete ones. Use this new output directory, not a previous
-search directory with different candidates.
+Download `results/eegnet-A03-spatial-fusion-v1/report/`. Keep `artifacts/` on the
+cluster. PCA is the fast diagnostic default in these commands; use
+`--embedding tsne` if desired. Classification accuracy is unaffected.
 
-This single-seed pilot did not improve selected test accuracy. Batch size
-affects both gradient updates and BatchNorm statistics, so it does not isolate
-BatchNorm as the cause. Keep these commands as the reproduction record;
-the result does not support promoting batch 48 as the new default.
+New EEGNet configurations default to `model_options.electrode_architecture=spatial_fusion`.
+The five preceding named `eegnet-*interchannel*` / `eegnet-a03-base-agfl-attentions`
+presets explicitly retain `compact`, so rerunning an old study does not silently
+change its architecture. This also preserves the current `tune-eegnet` search.
+The earlier nine-subject `eegnet-interchannel-attentions` experiment (315 fits)
+and its commands remain documented in the inter-channel guide; it uses the
+previous compact layout, not the new spatial-fusion repair.
+The earlier A03-only preset `eegnet-interchannel-comparison` remains available;
+it compares gated AGFL, gated MHA and plain MHA and is a different experiment.
+`eegnet-a03-a04-interchannel` retains the completed base/enhanced AGFL versus
+base MHA design for A03 and A04. Its original settings and results are preserved.
 
-**Optional repeatable raw audit:** `audit-eeg` checks a saved T-session run against its
-raw recording without training or checkpoint inference. `plot-eeg-audit`
-then creates PNG/PDF plots and a self-contained `report.html`. See
-[the raw EEG audit commands and outputs](docs/eeg_raw_audit.md).
+For accuracy numbers alone, run `analyze SESSION` without `--plots`; send
+`SESSION/report/analysis/subject_study.json` for a declared comparison study.
+Checkpoint diagnostics are not required to calculate or report accuracy.
 
-**Latest A06 compact check:** neither compact candidate beats the spatial
-control on seed-0 validation (39.53% and 37.21%, versus 46.51%). The selected
-control reproduces **32.56% test accuracy** exactly. The
-[A06 compact review](docs/eegnet_a06_compact_review.md) explains the histories,
-checkpoint selection and next diagnostic work. It also includes the `analyze`
-command for result plots: the downloaded folder contains the 18 checkpoint
-diagnostic figures, but no result-plot index or aggregate analysis tables.
-
-To reproduce a raw-audit report inside the organized session, launch it on the cluster:
-
-```bash
-python main.py audit-eeg \
-  results/eegnet-A06-compact-check/artifacts/selected/eeg/subject_A06/seed_0 \
-  --data-dir ../ml \
-  --output-dir results/eegnet-A06-compact-check/report/data-audit
-```
-
-Then generate the audit plots and single-file report:
-
-```bash
-python main.py plot-eeg-audit results/eegnet-A06-compact-check/report/data-audit
-```
-
-The session's `report/` download now includes `data-audit/report.html` and its
-supporting numerical records. These audit figures are additional to the
-classification plots generated by `analyze`.
-
-**Latest A03/A06 check:** the same validation-selected spatial procedure gives
-**86.67%** mean test accuracy on A03 and **31.63%** on A06 over five seeds,
-compared with 69.63% and 28.37% previously. All 252 result/diagnostic figures
-are present in the downloaded study. A06 remains unresolved, and the
-nine-subject 75% target is unproven. The
-[A03/A06 review](docs/eegnet_a03_a06_review.md) explains the data and error
-checks and gives a three-fit A06-only follow-up with separate plot commands.
-
-**Latest A01 result:** validation selection between `spatial_control` and
-`spatial_recombine` gives **71.64% mean test accuracy (SD 3.30 percentage
-points)** over five seeds, compared with 68.00% for the fixed spatial control.
-Augmentation is selected for four seeds. The 75% target remains unmet.
-The [augmentation review](docs/eegnet_a01_augmentation_review.md) documents
-this result and the commands used for the A03/A06 check above.
-
-**A01 follow-up:** the spatial model averages **68.00% test accuracy (SD 3.30
-percentage points)** over seeds 0–4, compared with 49.82% for the earlier A01
-model. The following experiment isolated segment augmentation on this spatial
-configuration. The [five-seed review and complete plot commands](docs/eegnet_a01_spatial_seeds_review.md)
-describe the evidence and outputs. After updating the cluster checkout, run
-from `AGFL`:
-
-```bash
-python main.py tune-eegnet --data-dir ../ml --subjects 1 --seeds 0 1 2 3 4 \
-  --candidate spatial_control --candidate spatial_recombine \
-  --output-dir results/eegnet-A01-spatial-augmentation
-```
-
-This is **10 validation-only fits and five selected checkpoint test evaluations**,
-all for A01. `spatial_recombine` changes only training-trial segment
-recombination. Each seed's winner is chosen on validation. All other settings
-and trial IDs are held fixed. Its measured A01 result is 71.64%, as summarized
-above; the 75% target is still unmet. The candidate is opt-in; the original five-candidate search
-below retains its previous scope.
-
-For the downloaded **46.76%** study, use this focused workflow. It keeps
-**EEGNet + AGFL, four classes and nine separately trained subjects**. The
-compact candidates restore early spatial filtering, preserve 31 time tokens,
-reduce feature width, use cross-entropy and a lower learning rate, and stop
-on validation stagnation. The search compares training-channel versus per-trial
-normalization and optional same-class training-trial segment recombination.
-**75% mean test accuracy is a target; these settings have not yet demonstrated it.**
-See [rationale, candidate settings and evaluation protocol](docs/eegnet_bci2a_improvement.md).
-
-Run these commands **on the cluster, from `AGFL`**, with `A01T.gdf` through
-`A09T.gdf` in `../ml`. A two-epoch execution check uses its own output directory:
-
-```bash
-source ~/.venv/bin/activate
-python main.py tune-eegnet --data-dir ../ml --subjects 1 --seeds 0 \
-  --candidate compact_trialnorm --epochs 2 --output-dir results/eegnet-bci2a-smoke
-```
-
-The full study runs five candidates, nine subjects and five seeds: **225
-validation-only training runs, then 45 selected checkpoint test evaluations**.
-It does not retrain the selected checkpoints. Run:
-
-```bash
-python main.py tune-eegnet --data-dir ../ml --output-dir results/eegnet-bci2a-search
-```
-
-Checkpoint selection and candidate selection use validation only, separately
-within each subject/seed split. Every candidate uses the same trial IDs in that
-split. Candidate runs never evaluate the test partition. Settings for all
-requested runs are written to `selection_report.json` before any final testing.
-The 60/20/20 T-session split, cue window, artifact exclusion and four-class task
-remain fixed. Different seeds use overlapping random splits; their scores do
-not represent independent new test cohorts.
-
-Relaunch the **identical command** after an interruption: completed candidates
-are reused and incomplete candidates restart from epoch 1 automatically.
-Use `--restart` to retrain everything in that same search. Use a new output
-directory when changing seeds, subjects, candidate list or epoch budget; this
-prevents old selected runs from being included in the new study.
-Add `--dry-run` to inspect settings without loading data. Repeat `--candidate`
-to request a subset; the five names are listed in the linked guide.
-
-If you want one fixed compact setting instead of searching, run:
-
-```bash
-python main.py run --preset eegnet-bci2a --output-dir results/eegnet-bci2a-fixed
-```
-
-This is 45 ordinary runs with the `compact_trialnorm` configuration. Use
-`--skip-completed` to preserve finished runs when relaunching that command.
-
-**Reports and plots for the search:** the overall score, each subject's score
-and selected settings are in
-`results/eegnet-bci2a-search/report/search_report.md` and `search_result.json`.
-Generate signal, embedding and AGFL plots for every selected checkpoint:
-
-```bash
-python main.py diagnose-session results/eegnet-bci2a-search \
-  --device cuda --partition validation --embedding tsne
-```
-
-Then generate learning curves, confusion matrices, ROC curves and tables:
-
-```bash
-python main.py analyze results/eegnet-bci2a-search --plots
-```
-
-Download **`results/eegnet-bci2a-search/report/`** and open
-`analysis/figures/index.md` inside it. The report's candidate records contain
-validation histories and `selection.json`, without test result files.
-Selected settings may differ across seeds/subjects, so generic `analyze`
-tables group them by configuration. **Use `search_report.md` for the overall
-score of this tuning procedure**, rather than averaging those configuration
-groups. For the fixed-preset command, use `results/eegnet-bci2a-fixed` as the
-session argument to both plotting commands.
-
-## Compare attention within one model
-
-### Earlier A03 EEGNet pilot: MHA versus AGFL
-
-These commands preserve the completed two-attention pilot. The completed
-[A03 all-attention workflow](docs/eegnet_a03_all_attentions.md) records the
-five-method comparison; the current launch is the
-[EEGNet token-routing comparison](docs/eegnet_agfl_token_routing.md).
-
-After updating the cluster checkout, run from `AGFL` with the Python
-environment active and `../ml/A03T.gdf` available. The
-`eegnet-a03-attention` preset runs **one subject, two attentions, five seeds
-(0–4): ten fits, each for 250 epochs**. It uses the fixed `spatial_control`
-backbone and training recipe for both attentions: batch 64, learning rate
-0.005, weighted focal loss, training-channel normalization and no data
-augmentation. Each seed uses matching trial splits. Checkpoints are selected
-by validation accuracy and both attention methods are evaluated on test.
-
-Train:
-
-```bash
-python main.py sweep --preset eegnet-a03-attention \
-  --output-dir results/eegnet-A03-attention \
-  --skip-completed
-```
-
-An identical relaunch keeps completed matching runs and restarts incomplete
-runs from epoch 1. Omit `--skip-completed` to overwrite matching completed
-runs too. Use a new output directory when changing the study settings.
-
-After training finishes, generate signal, embedding and attention plots for
-both methods and every seed. Run this block in **Bash**:
-
-```bash
-python main.py diagnose-session results/eegnet-A03-attention \
-  --device cuda --partition validation --embedding tsne
-```
-
-Then generate the training, confusion-matrix, ROC and paired attention
-comparison figures and analysis tables:
-
-```bash
-python main.py analyze results/eegnet-A03-attention --plots
-```
-
-Download only **`results/eegnet-A03-attention/report/`**. Within that folder,
-the main result-plot index is `analysis/figures/index.md`; each directory below
-`diagnostics` has its own `index.md`. `analysis/attention_comparison.csv`
-contains attention summaries across seeds, `analysis/statistical_comparisons.csv`
-contains paired AGFL-minus-MHA differences, and `analysis/report.md`
-summarizes the results. Both methods' results remain in the report; this
-is an attention comparison, not validation selection of one winning method.
-A03 is a pilot chosen using previous results, not confirmation of an
-all-nine-subject claim. The AGFL recipe matches the current spatial control;
-it does not claim to reproduce every setting described in the historical PDF.
-
-### Deferred: extend the fixed attention comparison to all nine subjects
-
-**Do not launch this as the next experiment.** First complete the
-[A03 EEGNet token-routing comparison](docs/eegnet_agfl_token_routing.md).
-The commands below preserve the earlier fixed-comparison expansion for
-reference; a later study must use the chosen AGFL method or selection procedure.
-
-The completed A03 pilot does not establish an across-subject advantage.
-Keep the same model, preprocessing, training recipe and seeds, and extend
-the sweep. The existing output directory intentionally retains its A03 name
-so matching completed A03 runs can be reused: **80 new fits, 90 total** with
-unchanged source, dependencies, data and saved settings. This extension is
-for the fixed `sweep` command; scope changes in `tune-eegnet` still require
-a new search directory.
-
-```bash
-python main.py sweep --preset eegnet-a03-attention \
-  --set 'data.subjects=[1,2,3,4,5,6,7,8,9]' \
-  --output-dir results/eegnet-A03-attention \
-  --skip-completed
-```
-
-After training completes, generate all checkpoint diagnostics in Bash:
-
-```bash
-python main.py diagnose-session results/eegnet-A03-attention \
-  --device cuda --partition validation --embedding tsne
-```
-
-Then generate the result plots and paired comparison tables:
-
-```bash
-python main.py analyze results/eegnet-A03-attention --plots
-```
-
-Download only the updated `report/` folder. Report all nine subject means and the
-equal-weight average across them, including A06 and every matched seed.
-The expanded study is a measurement of the fixed comparison, not a promise
-of either a 75% overall score or AGFL superiority.
-
-### Broader model comparisons
-
-```bash
-python main.py sweep --preset eeg-comparison --model eegnet --output-dir results/eegnet-comparison
-python main.py sweep --preset eeg-comparison --model eegencoder --output-dir results/eegencoder-comparison
-python main.py sweep --preset ecg-comparison --model conformer --output-dir results/conformer-comparison
-```
-
-Each EEG comparison runs **one model × nine subjects × five attentions × five
-seeds = 225 runs**, always training subjects separately. Each ECG comparison
-runs **one model × five attentions × five seeds = 25 runs** on patient-group splits.
-The surrounding model, heads, training policy and splits are held fixed.
-Parameter counts may differ and are recorded. Use `run` for one attention.
-Identical resolved sweep configurations are executed only once, including when
-an explicit ablation repeats the chosen model's default.
+EEG maps use electrode labels, class-specific 22×22 matrices, scalp source
+weights, directed connection figures and complete edge CSV/NPZ exports.
+Gate plots are under `electrode_gate/`. These show learned sensor-level routing,
+not anatomical or causal brain connectivity. New models need fresh training;
+no existing checkpoint is silently converted.
 
 ## Configuration and ablations
 
@@ -773,16 +425,12 @@ previous results. These are inference checkpoints, not optimizer-resume files.
 
 ## Tables and all plots
 
-**Training does not generate images automatically.** After training, run both
+**Training generates images automatically only with `--report`.** Otherwise run both
 steps below on the cluster. `analyze --plots` uses saved artifacts only;
 `diagnose` additionally loads checkpoints and the original recordings. Neither
 trains a model. The CLI prints the result-plot command when training finishes.
 
-Install plotting dependencies in the active Python 3.12+ environment once:
-
-```bash
-python -m pip install -e '.[plots,umap]'
-```
+Use the existing plotting environment. PCA and t-SNE require no new optional library.
 
 **1. Signal, embedding and attention diagnostics for every completed run.**
 From `AGFL` on the cluster, use the session root passed to the training command:
@@ -826,6 +474,13 @@ include `per_subject.csv` (mean/sample SD over seeds for each subject),
 sets across subjects are flagged; no overall score is silently fabricated.
 Subject summaries identify the subjects actually present, including partial studies.
 
+The declared nine-subject study additionally writes `subject_study.md`,
+`subject_study.json`, `subject_study_per_subject.csv`,
+`subject_study_averages.csv` and `subject_study_comparisons.csv`. These verify
+the expected subjects, seeds and configurations even when a whole group is
+missing. Their paired tests compare subject means; the older
+`statistical_comparisons.csv` remains an exploratory seed-level breakdown.
+
 Checkpoint diagnostics in `report/diagnostics` are discovered automatically
 for sparsity/entropy-versus-accuracy figures. If they were written elsewhere,
 add `--diagnostics-root PATH`. An explicit `--output-dir` still overrides the
@@ -854,7 +509,7 @@ protocol; they are not reinterpreted as individual-subject experiments.
 | Seed summaries, subject scores, capacity plots | `analyze --plots` | Completed results |
 | Attention comparisons, paired differences and ablations | `analyze --plots` | Matching baseline/ablation experiments; one AGFL setting cannot provide these comparisons |
 | Example signals, spectra, EEG alpha/beta scalp maps, C3/C4 time-frequency maps, training-fitted CSP | `diagnose` | Checkpoint, matching recordings and channel metadata |
-| PCA/t-SNE/UMAP, per-head graph maps, AGFL coefficients and projections | `diagnose` | Checkpoint and matching recordings |
+| PCA/t-SNE/UMAP, electrode-labeled/class-specific graph maps and edge tables, scalp connections, AGFL coefficients and gates | `diagnose` | Checkpoint and matching recordings |
 | Sparsity/entropy versus accuracy | Step 2, after diagnostics | Matching verified diagnostic manifests |
 
 `manifest.json` lists unavailable figures and their reasons (missing metadata,
@@ -882,19 +537,9 @@ requires a fresh v2 configuration. Keep a running study's checkout stable.
 
 ## Verification and extension
 
-Optional developer checks on the target machine, for environments that already
-have `pytest`. These are separate from the training and plotting workflow:
-
-```bash
-python -m pytest -m 'not real_data'
-AGFL_REAL_DATA=1 python -m pytest -m real_data
-```
-
-The tests cover every model/attention/modality combination, injection and axes,
-common initialization, AGFL formulas and gradients, preserved native layouts
-with frozen original weights, strict CUDA pooling, data leakage, replay,
-statistics and plotting. They are written but have not been executed locally.
-Keep the original Git commit for the source-reference check; details are in
+Development tests remain separate from training and plotting. They have not
+been run locally; the cluster runtime is unverified. Do not install a test
+runner merely to launch an experiment. Historical source references are in
 [reference provenance](tests/references/ORIGIN.md).
 
 To extend models, add a model package exposing `SPEC`, defaults and EEG/ECG

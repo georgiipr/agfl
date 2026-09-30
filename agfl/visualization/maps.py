@@ -23,8 +23,13 @@ def mixer_map(mixer, inputs, max_tokens=256):
         return None, f'No map adapter for {type(mixer).__name__}'
     q, k, _ = mixer.project(inputs)
     if isinstance(mixer, MultiHeadAttention):
-        weights = (q @ k.transpose(-1, -2) / mixer.head_dim**.5).softmax(-1)
-        return weights, 'Multi-head softmax attention probabilities'
+        scores = q @ k.transpose(-1, -2) / mixer.head_dim**.5
+        if mixer.temporal_bias is not None:
+            scores = scores + mixer.temporal_bias(inputs.shape[1]).to(scores.dtype)
+        kind = 'MHA routing probabilities before output gating'
+        if mixer.temporal_bias is not None:
+            kind += ', including learned temporal bias'
+        return scores.softmax(-1), kind
     if isinstance(mixer, Performer):
         q, k = mixer.feature_map(q, True), mixer.feature_map(k, False)
         denominator = (q * k.sum(-2, keepdim=True)).sum(-1, keepdim=True).clamp_min(1e-12)

@@ -2,12 +2,13 @@
 from collections import defaultdict
 import json
 from pathlib import Path
+from textwrap import fill
 
 import numpy as np
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 
 from agfl.metrics import classification_metrics
-from agfl.analysis import attention_display_name
+from agfl.analysis import attention_display_name, run_graph_axis
 from agfl.config import experiment_selection
 from agfl.result_paths import diagnostic_manifest_paths
 
@@ -16,11 +17,12 @@ def selection_label(run):
     model, attention = experiment_selection(run['config'])
     subject = run['config'].get('subject_id')
     label = attention_display_name(attention, run['config'].get('attention_options', run['config']['model_options']))
-    return f'{model} / {label}' + (f' / {subject}' if subject else '')
+    return f'{model} / {label} / {run_graph_axis(run)} graph' + (f' / {subject}' if subject else '')
 
 
 def summary_label(summary):
-    return summary.get('attention_label') or attention_display_name(summary['attention'], summary.get('attention_options'))
+    label = summary.get('attention_label') or attention_display_name(summary['attention'], summary.get('attention_options'))
+    return label + (f" / {summary['token_axis']} graph" if summary.get('token_axis') else '')
 
 from .common import FigureWriter, slug
 
@@ -149,20 +151,24 @@ def plot_predictions(writer, run, partition, prefix):
 
 
 def plot_comparison(writer, experiments, runs_by_experiment, prefix, title):
-    figure, axes = writer.plt.subplots(1, 3, figsize=(max(12, len(experiments) * 1.7), 4.8), constrained_layout=True)
+    # Horizontal labels remain readable for augmented attention names and
+    # larger comparison matrices; long rotated names previously crushed axes.
+    figure, axes = writer.plt.subplots(1, 3, figsize=(15, max(4.8, len(experiments) * 1.05)),
+                                      sharey=True, constrained_layout=True)
     for axis, metric, metric_title in zip(axes, METRICS, TITLES):
         for position, experiment in enumerate(experiments):
             values = [r['test'].get(metric) for r in runs_by_experiment[experiment['experiment_id']]]
             values = [value for value in values if value is not None]
             summary = experiment['metrics']['test_' + metric]
             if values:
-                axis.scatter(position + np.linspace(-.12, .12, len(values)), values, s=18, alpha=.7)
-                axis.errorbar(position, summary['mean'], yerr=summary['std'], fmt='ks', capsize=5)
-            axis.text(position, 1.02, f'n={len(values)}', ha='center', fontsize=8)
-        axis.set(xticks=range(len(experiments)), xticklabels=[f"{e['model']} / {summary_label(e)}\n{e.get('subject_id') or 'cohort'} / {e['experiment_id'][:8]}" for e in experiments],
-                 ylim=(0, 1.1), title=metric_title, ylabel='Test score')
-        axis.tick_params(axis='x', rotation=30)
-        axis.grid(axis='y', alpha=.2)
+                axis.scatter(values, position + np.linspace(-.12, .12, len(values)), s=18, alpha=.7)
+                axis.errorbar(summary['mean'], position, xerr=summary['std'], fmt='ks', capsize=5)
+            axis.text(1.01, position, f'n={len(values)}', va='center', fontsize=8)
+        axis.set(yticks=range(len(experiments)), xlim=(0, 1.12), xlabel='Test score', title=metric_title,
+                 ylim=(len(experiments) - .5, -.5))
+        axis.grid(axis='x', alpha=.2)
+    axes[0].set_yticklabels([fill(summary_label(e), 30) + f"\n{e.get('subject_id') or 'cohort'} / {e['experiment_id'][:8]}"
+                            for e in experiments])
     figure.suptitle(title)
     writer.save(figure, prefix, 'Points are seeds; black squares and bars show mean and sample SD, not confidence intervals. IDs map to aggregation.json.')
 
@@ -298,6 +304,12 @@ def generate_result_plots(aggregation, output_dir, diagnostics_root=None):
         writer.save(figure, name, 'Only identical seed/split/data/protocol pairs are shown. Seed-level inference remains exploratory.')
     if diagnostics_root is not None:
         plot_diagnostic_comparisons(writer, diagnostics_root, by_experiment)
+    if aggregation.get('temporal_gate_studies'):
+        from agfl.temporal_gate_study import plot_studies
+        plot_studies(writer, aggregation['temporal_gate_studies'])
+    if aggregation.get('subject_studies'):
+        from .subject_study import plot_subject_studies
+        plot_subject_studies(writer, aggregation['subject_studies'])
     return writer.finish({'schema_version': 1, 'kind': 'saved_results', 'sources': aggregation['sources'],
                           'diagnostics_root': str(Path(diagnostics_root).resolve()) if diagnostics_root is not None else None,
                           'methodology': aggregation['methodology']})

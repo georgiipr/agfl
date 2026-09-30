@@ -9,3 +9,7 @@ EEG_DEFAULTS = {
     'temporal_statistics': 'mean',
 }
 ECG_DEFAULTS = {**EEG_DEFAULTS, 'pk1': 4, 'pk2': 4, 'attention_axis': 'time'}
+# Keep the original spatial convolution features alongside electrode attention.
+# Snapshot reconstruction supplies 'compact' for saved runs without this key.
+# ECG defaults above deliberately exclude both EEG-specific selectors.
+EEG_DEFAULTS.update(electrode_dim=32, electrode_architecture='spatial_fusion')

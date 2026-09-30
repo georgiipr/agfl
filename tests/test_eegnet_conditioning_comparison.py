@@ -7,7 +7,7 @@ import pytest
 from agfl.analysis import analyze_results, attention_display_name
 from agfl.config import comparison_identity, experiment_identity, merge, resolve_config, resolve_experiments
 from agfl.models.eegnet.search import search_configs
-from agfl.presets import load_preset
+from tests.references.presets import load_archived_preset as load_preset, archived_experiments
 from agfl.visualization.results import selection_label
 from tests.test_analysis import save_run
 
@@ -28,7 +28,7 @@ def test_comparison_retains_the_control_and_strongest_observed_baseline():
     assert baseline == next(e for e in original['experiments'] if e['attention'] == 'linformer'
                             and e['attention_options']['projection_rank'] == 4)
     configs = [config for variant in document['experiments']
-               for config in resolve_experiments(merge(document['base'], variant))]
+               for config in archived_experiments(merge(document['base'], variant))]
     assert len(configs) == 3
     assert sum(len(config['seeds']) for config in configs) == 15
     assert {config['subject_id'] for config in configs} == {'A03'}
@@ -40,12 +40,12 @@ def test_comparison_retains_the_control_and_strongest_observed_baseline():
                for config in configs)
 
 
-def test_comparison_control_matches_the_previous_sparse_search_recipe(tmp_path):
-    document = load_preset('eegnet-a03-conditioned-agfl')
-    fixed = resolve_experiments(merge(document['base'], document['experiments'][0]))[0]
-    previous = search_configs('../ml', document['base']['output_dir'], [3], list(range(5)),
-                              ['spatial_qkv_sparse'], epochs=250)['spatial_qkv_sparse'][0]
-    assert fixed == previous
+def test_retired_temporal_search_cannot_be_started(tmp_path):
+    with pytest.raises(ValueError, match='candidates'):
+        search_configs('../ml', tmp_path, [3], [0], ['spatial_qkv_sparse'])
+    current = search_configs('../ml', tmp_path, [3], [0])
+    assert all(c['model_options']['attention_axis'] == 'electrode'
+               for group in current.values() for c in group)
 
 
 def save_comparison(root, name, attention, seed, accuracy, *, options=None, split=None):
@@ -113,6 +113,6 @@ def test_saved_options_drive_readable_plot_labels():
     config = resolve_config({'model': 'eegnet', 'attention': 'agfl',
                              'attention_options': {'coefficient_conditioning': 'trial_power'}})
     config['subject_id'] = 'A03'
-    assert selection_label({'config': config}) == 'eegnet / AGFL (trial-conditioned, scale 0.5) / A03'
+    assert selection_label({'config': config}) == 'eegnet / AGFL (trial-conditioned, scale 0.5) / electrode graph / A03'
     assert attention_display_name('agfl', {}) == 'AGFL (static)'
     assert attention_display_name('linformer', {'projection_rank': 4}) == 'Linformer (rank 4)'

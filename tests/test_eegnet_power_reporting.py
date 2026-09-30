@@ -7,7 +7,7 @@ import pytest
 from agfl.analysis import class_statistics
 from agfl.config import comparison_identity, experiment_identity, merge, resolve_experiments
 from agfl.metrics import classification_metrics
-from agfl.presets import load_preset
+from tests.references.presets import load_archived_preset as load_preset, archived_experiments
 from agfl.visualization.temporal_statistics import TemporalStatisticsCapture, temporal_statistics_figures
 
 
@@ -58,7 +58,7 @@ def test_power_preset_keeps_data_and_agfl_recipe_and_matches_all_attentions():
     assert current['experiments'][0] == previous['experiments'][0]
     assert current['experiments'][2] == previous['experiments'][2]
     assert [row['attention'] for row in current['experiments']] == ['agfl', 'mha', 'linformer']
-    configs = [resolve_experiments(merge(current['base'], experiment))[0] for experiment in current['experiments']]
+    configs = [archived_experiments(merge(current['base'], experiment))[0] for experiment in current['experiments']]
     assert len({comparison_identity(config) for config in configs}) == 1
     assert len({experiment_identity(config) for config in configs}) == 3
     assert all(config['subject_id'] == 'A03' and config['model'] == 'eegnet' for config in configs)

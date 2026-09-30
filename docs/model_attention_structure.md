@@ -5,9 +5,9 @@ mechanism inserted into that backbone. Both are stored in configs, results,
 paths, tables and plot labels. Changing attention does not substitute a generic
 Signal Transformer for EEGNet or another selected model.
 
-| Model | EEG default | ECG default |
+| Model | Required EEG layout | ECG layout |
 |---|---|---|
-| EEGNet | Per-electrode convolutions; residual electrode attention; learned spatial filters shared across time bins. | Lead-spanning convolutions; residual temporal attention; flattened readout. |
+| EEGNet | Shared temporal stem; full-channel spatial convolution path plus per-electrode encoding/attention; concatenate pooled spatial features and electrode readout. | Lead-spanning convolutions; residual temporal attention; flattened readout. |
 | EEGEncoder | Per-electrode convolution/TCN; local and attention features share a learned spatial readout. | Convolution across leads, parallel causal TCN and temporal attention; fused readout. |
 | DSTS EEGEncoder | Per-electrode down-projection; branch-specific TCN, electrode attention and learned spatial readout; logit ensemble. | Down-projection across leads; temporal/attention branches; logit ensemble. |
 | Conformer | Per-electrode temporal stem; electrode attention and pointwise convolution; learned spatial readout plus max. | Lead projection; temporal attention/depthwise convolution; mean+max readout. |
@@ -16,8 +16,11 @@ Signal Transformer for EEGNet or another selected model.
 Every attention module consumes and returns [batch, tokens, features].
 The same five attention implementations work at each location. Heads must divide
 the actual feature dimension; this is checked when the model is built.
-EEGNet electrode features have width f2 × pooled_time, unlike its temporal
-attention width f2. Linformer sequence projections use the actual token count.
+EEGNet electrode features have width `electrode_dim` (32 by default), independent
+of the pooled time-bin count. All EEG attention modules must have exactly C
+electrode nodes; ECG modules use time/time-patch nodes. This is checked in
+configuration resolution, attention construction and the assembled model.
+Linformer sequence projections use the actual node count.
 
 ## Changes relative to the original sources
 
@@ -25,13 +28,21 @@ Electrode EEG variants require different spatial aggregation: the original
 EEG models collapsed channels before attention. Per-electrode feature extraction
 and readout adaptations are intentional new variants. ECG variants of the three
 EEG families also introduce explicit lead/time shapes and suitable pooling.
-EEGNet, EEGEncoder and DSTS add fixed positional encoding to electrode tokens;
-this preserves channel identity through shared per-electrode extraction and
-spatial readout. Conformer and Signal Transformer use learned position embeddings.
+New EEGNet uses learned electrode-identity embeddings initialized at zero.
+Its `electrode_architecture=spatial_fusion` path restores depthwise convolution
+across all electrodes before ELU/pooling. That path contributes `f2 * steps`
+features alongside `electrode_dim` features from the attention path. The shared
+temporal stem is evaluated once; later normalization and dropout belong to each
+path separately. Attention receives only electrode-local features, never the
+collapsed spatial features. With current A03 settings the classifier width is
+224 + 32 = 256. See [repair and experiment](eegnet_spatial_fusion.md).
+EEGEncoder and DSTS retain their fixed electrode-identity encodings; their
+indices do not represent physical distances. Conformer and Signal Transformer
+use learned identity embeddings. No temporal-distance bias is allowed on EEG.
 
 All electrode variants now use feature-specific signed spatial filters
-(`model_options.spatial_readout=learned`). EEGNet shares electrode weights across
-pooled time bins and constrains their max norm. Its `attention_residual=true`
+(`model_options.spatial_readout=learned`). New EEGNet aggregates its compact
+electrode features and constrains the readout max norm. Its `attention_residual=true`
 preserves the local signal and its gradients when AGFL taps are zero, for EEG
 and ECG. AGFL equations are unchanged. These are architecture revisions, not
 demonstrated accuracy gains. Older checkpoints reconstruct the previous mean
@@ -46,13 +57,16 @@ positional encoding uses the selected token count. DSTS requires explicit
 Conformer EEG performs temporal convolution in its electrode stem; block
 convolution uses kernel 1 because electrode order is not a temporal neighborhood.
 
-EEGNet, EEGEncoder and DSTS EEG variants expose
-`model_options.attention_axis=time` for temporal placement. This changes
-the comparison identity and must be treated as a different architecture.
-It does not promise original behavior for every corrected implementation.
-Frozen-weight parity checks specifically cover EEGNet with its original default
-dimensions, temporal placement and `attention_residual=false`, and Conformer ECG. They avoid conflating
-controlled forward behavior with changed initialization/training policies.
+New EEG runs reject `model_options.attention_axis=time`. The historical paths
+exist only behind `ModelSpec.rebuild_saved` for checkpoint reconstruction;
+training calls `build` and cannot opt into the historical path through JSON.
+Old EEGNet electrode checkpoints without `electrode_dim` retain their original
+flattened feature width in replay. Old temporal checkpoints retain time nodes.
+Saved EEGNet configs without `electrode_architecture` reconstruct `compact`,
+without the new spatial modules or wider classifier. Previous named electrode
+presets explicitly retain that layout; the new comparison uses a fresh name.
+No old result or heatmap is relabeled as inter-channel evidence. Frozen-weight
+reference checks exercise this replay path and the unchanged Conformer ECG.
 
 Original independent sources are retained under tests/references. AGFL layer
 equations retain their own independent forward/gradient reference. No local

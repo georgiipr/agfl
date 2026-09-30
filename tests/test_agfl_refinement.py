@@ -146,10 +146,10 @@ def test_refinement_keeps_eegnet_and_shared_projection_initialization_fixed():
     refined_options = {**control_options, 'score_scaling': 'temperature',
                        'temperature_init': 0.5, 'coefficient_init': 'identity_one_hop'}
     torch.manual_seed(79)
-    control = spec.build(model_options, metadata, 'agfl', control_options).double().eval()
+    control = spec.rebuild_saved(model_options, metadata, 'agfl', control_options).double().eval()
     expected_rng = torch.get_rng_state().clone()
     torch.manual_seed(79)
-    refined = spec.build(model_options, metadata, 'agfl', refined_options).double().eval()
+    refined = spec.rebuild_saved(model_options, metadata, 'agfl', refined_options).double().eval()
     assert torch.equal(torch.get_rng_state(), expected_rng)
     assert control.num_tokens == refined.num_tokens == 7
     initial_control, initial_refined = control.state_dict(), refined.state_dict()

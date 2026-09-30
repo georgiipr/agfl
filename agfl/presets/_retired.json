@@ -1,0 +1,15 @@
+{
+  "presets": [
+    "eegnet-a03-all-attentions",
+    "eegnet-a03-attention",
+    "eegnet-a03-conditioned-agfl",
+    "eegnet-a03-feature-agfl",
+    "eegnet-a03-power-ema",
+    "eegnet-a03-temporal-gate-baselines",
+    "eegnet-a03-temporal-gate",
+    "eegnet-a03-token-agfl",
+    "eegnet-bci2a",
+    "eegnet-nine-subject-attentions"
+  ],
+  "reason": "Temporal EEG studies retired on 2026-09-28. Use eegnet-interchannel presets; original JSON is archived unchanged."
+}

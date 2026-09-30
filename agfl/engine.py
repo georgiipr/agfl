@@ -279,6 +279,9 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
     from .models import get_model_spec
     from .session import find_session, mirror_run
     run_dir = Path(run_dir)
+    save_checkpoints = config['training'].get('save_checkpoints', True)
+    if validation_only and not save_checkpoints:
+        raise ValueError('Validation-only searches need training.save_checkpoints=true for later evaluation')
     session = find_session(run_dir)
     seed = config['seeds'][0]
     if config.get('subject_id') is not None and set(bundle.groups) != {config['subject_id']}:
@@ -305,6 +308,7 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
     scaler = torch.amp.GradScaler('cuda', enabled=options['amp'])
     ema = ExponentialMovingAverage(model, options['ema_decay']) if options.get('ema_decay', 0) else None
     history, best_metrics, best_epoch, best_policy = [], None, None, None
+    best_checkpoint = None
     criterion = options['checkpoint_criterion']
     tiebreaker = options.get('checkpoint_tiebreaker', 'none')
     started = time.monotonic()
@@ -354,12 +358,19 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
             better = checkpoint_is_better(validation, best_metrics, criterion, tiebreaker)
             if better:
                 best_metrics, best_epoch, best_policy = copy.deepcopy(validation), epoch, copy.deepcopy(policy)
-                torch.save({
+                selected_checkpoint = {
                     'model': {k: v.detach().cpu().clone() for k, v in evaluated_model.state_dict().items()},
                     'epoch': epoch, 'validation': validation, 'config': config,
                     'checkpoint_policy': policy,
                     'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
-                    'normalization': normalization}, run_dir / 'checkpoint.pt')
+                    'normalization': normalization}
+                if save_checkpoints:
+                    torch.save(selected_checkpoint, run_dir / 'checkpoint.pt')
+                else:
+                    # Preserve the selected epoch independently of live model
+                    # weights, without writing any checkpoint file to disk.
+                    best_checkpoint = selected_checkpoint
+                del selected_checkpoint
             history.append({'epoch': epoch, 'train_loss': loss_total / n, 'train_accuracy': correct / n,
                             'validation': validation, 'learning_rate': learning_rate,
                             'amp_skipped_steps': skipped_steps, 'checkpoint_policy': policy})
@@ -389,12 +400,16 @@ def run_training(config, bundle, split, run_dir, *, validation_only=False):
         }
         write_json(run_dir / 'selection.json', selected)
         return selected
-    return evaluate_saved_checkpoint(config, bundle, split, run_dir,
-                                     elapsed_seconds=time.monotonic() - started, model=model)
+    evaluation_options = {'elapsed_seconds': time.monotonic() - started, 'model': model}
+    if not save_checkpoints:
+        if best_checkpoint is None:
+            raise RuntimeError('Training did not select a validation checkpoint')
+        evaluation_options['checkpoint'] = best_checkpoint
+    return evaluate_saved_checkpoint(config, bundle, split, run_dir, **evaluation_options)
 
 
-def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds=0., model=None):
-    """Evaluate a selected checkpoint; also used after validation-only search."""
+def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds=0., model=None, checkpoint=None):
+    """Evaluate selected weights from disk or an independent in-memory snapshot."""
     from .models import get_model_spec
     started = time.monotonic()
     run_dir = Path(run_dir)
@@ -403,13 +418,16 @@ def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds
     spec = get_model_spec(config['model'])
     seed_everything(seed, config['deterministic'], config['threads'])
     if model is None:
-        model = spec.build(config['model_options'], bundle.metadata, config['attention'], config['attention_options']).to(device)
+        model = spec.rebuild_saved(config['model_options'], bundle.metadata, config['attention'], config['attention_options']).to(device)
     loaders, normalization = make_loaders(bundle, split, config, seed)
     counts = np.bincount(bundle.y[split['train']], minlength=bundle.metadata['num_classes'])
     weights = (torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32, device=device)
                if options['class_weights'] == 'balanced' else None)
     loss_fn = ClassificationLoss(weights, options['loss'], options['focal_gamma'])
-    checkpoint = torch.load(run_dir / 'checkpoint.pt', map_location='cpu', weights_only=False)
+    if checkpoint is None:
+        if not options.get('save_checkpoints', True):
+            raise ValueError('This run did not retain a checkpoint; its selected weights must be supplied in memory')
+        checkpoint = torch.load(run_dir / 'checkpoint.pt', map_location='cpu', weights_only=False)
     if (checkpoint['config'] != config or checkpoint['split_id'] != split['split_id']
             or checkpoint['dataset_fingerprint'] != bundle.fingerprint):
         raise ValueError('Selected checkpoint does not match its configuration, data and split')
@@ -439,12 +457,14 @@ def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds
         'trainable_parameter_count': sum(p.numel() for p in model.parameters() if p.requires_grad),
         'best_checkpoint_epoch': checkpoint['epoch'], 'validation': validation, 'test': test,
         'checkpoint_policy': checkpoint.get('checkpoint_policy', {'weights': 'raw'}),
+        'checkpoint_retained': options.get('save_checkpoints', True),
         'epochs_trained': len(json.loads((run_dir / 'history.json').read_text())),
         'test_by_subject': group_metrics,
         'training_class_counts': counts.tolist(), 'class_weights': None if weights is None else weights.cpu().tolist(),
         'elapsed_seconds': elapsed_seconds + time.monotonic() - started, 'config': config,
         'experiment_id': experiment_identity(config), 'comparison_id': comparison_identity(config),
         'token_axis': model.token_axis,
+        'node_labels': bundle.metadata.get('channel_names') if model.token_axis == 'electrode' else None,
         'num_tokens': getattr(model, 'num_tokens', None),
         'attention_modules': [{'name': name, 'attention': module.attention_key,
                                'num_tokens': module.num_tokens, 'token_axis': module.token_axis}
@@ -456,7 +476,9 @@ def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds
 
 def completed_run(run_dir, config):
     """Only fully written, matching runs are eligible for --skip-completed."""
-    required = ('result.json', 'config.json', 'split.json', 'history.json', 'checkpoint.pt', 'predictions.npz')
+    required = ('result.json', 'config.json', 'split.json', 'history.json', 'predictions.npz')
+    if config['training'].get('save_checkpoints', True):
+        required += ('checkpoint.pt',)
     if not all((run_dir / name).is_file() for name in required):
         return None
     if (run_dir / 'failure.json').exists():

@@ -1,6 +1,24 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # EEGNet/A03: improve AGFL while restoring the previous model
 
-The active preset is **`eegnet-a03-token-agfl`**. It restores the original
+**Completed:** revised AGFL averaged **85.19%**, original AGFL **84.44%**,
+MHA **85.56%**, and Linformer **85.93%**. All 20 fits finished. The subsequent
+diagnostic JSON serialization error is fixed; use the
+[saved-results review and recovery commands](eegnet_a03_token_review.md)
+to regenerate reports without training again. Commands below preserve the
+full experiment for reproduction.
+
+The completed preset is **`eegnet-a03-token-agfl`**. The subsequent
+[feature-wise experiment](eegnet_a03_feature_review.md) fell to 84.07%;
+token routing remains the best observed AGFL test result at 85.19%.
+The subsequent [SAM experiment](eegnet_a03_sam_review.md) fell to 81.11%
+and has been rolled back. The retained configuration again uses ordinary
+AdamW. The later energy-input candidate reached 84.81% and has also been
+rolled back. See the [energy results](eegnet_a03_energy_review.md),
+[restoration/upload guide](eegnet_token_restore.md) and
+[failure-based research rationale](eegnet_after_sam.md).
+This completed study restores the original
 seven-token EEGNet and its previous training recipe, then tests one change
 inside AGFL: **a separate hop mixture for each token, informed by its graph
 neighborhood**. The original static AGFL remains a measured control.
@@ -189,14 +207,22 @@ python main.py sweep --preset eegnet-a03-token-agfl \
 ```
 
 This runs the 20 fits sequentially with progress bars, followed by validation
-checkpoint diagnostics and result plots. The four-hour allocation is a
+checkpoint diagnostics and result plots. If checkpoint diagnostics raise an
+error, automatic reporting still attempts result plots from saved predictions
+before propagating the diagnostic error. A user interruption exits immediately.
+The four-hour allocation is a
 resource request, not a completion-time estimate. No installation, `.sbatch`
 file or development test run is required.
 
-After an interruption, add `--skip-completed` to that command to retain
+After a training interruption, add `--skip-completed` to that command to retain
 matching completed fits. Preserve the same source, configuration, data and
 environment; reuse checks include provenance. Incomplete fits restart from
 epoch 1. Without that flag, matching existing fits are rerun.
+
+If all fits completed and only plotting failed, run the two separate commands
+below instead of relaunching the sweep. A plotting-only source update does
+not require retraining; training reuse checks intentionally treat source
+changes as a new comparison.
 
 Separate checkpoint-diagnostic command, if automatic reporting needs recovery:
 

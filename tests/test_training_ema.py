@@ -23,7 +23,7 @@ def tiny_ema_config(tmp_path, decay=.5):
         'output_dir': str(tmp_path / 'results'), 'split_dir': str(tmp_path / 'splits'),
         'data': {'subjects': 6, 'samples_per_subject': 8, 'channels': 4, 'samples': 128},
         'model_options': {'f1': 2, 'd': 2, 'f2': 4, 'temp_kernel': 8,
-                          'pk1': 4, 'pk2': 4, 'attention_axis': 'time'},
+                          'pk1': 4, 'pk2': 4, 'attention_axis': 'electrode', 'electrode_dim': 8},
         'training': {'epochs': 3, 'batch_size': 8, 'loss': 'cross_entropy',
                      'ema_decay': decay, 'checkpoint_tiebreaker': 'f1_loss'},
     }

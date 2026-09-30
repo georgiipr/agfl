@@ -18,7 +18,8 @@ from agfl.models.eegnet.ecg import ECGModel
 
 
 def small_options(**changes):
-    return {**deepcopy(EEG_DEFAULTS), 'attention_axis': 'time', 'temp_kernel': 9,
+    return {**{k: v for k, v in deepcopy(EEG_DEFAULTS).items()
+               if k not in {'electrode_dim', 'electrode_architecture'}}, 'attention_axis': 'time', 'temp_kernel': 9,
             'f1': 4, 'd': 2, 'f2': 8, 'pk1': 2, 'pk2': 4,
             'dropout_rate': 0., **changes}
 
@@ -28,7 +29,7 @@ def metadata(modality='eeg'):
 
 
 def build(options, attention='agfl', modality='eeg'):
-    return get_model_spec('eegnet').build(
+    return get_model_spec('eegnet').rebuild_saved(
         options, metadata(modality), attention, {'heads': 2})
 
 
@@ -51,7 +52,7 @@ def test_historical_default_has_no_new_keys_and_keeps_rng(initialization):
     historical = deepcopy(options)
     historical.pop('temporal_statistics')
     torch.manual_seed(42)
-    old = EEGModel(historical, metadata(), AttentionFactory('agfl', {'heads': 2})).double().eval()
+    old = EEGModel(historical, metadata(), AttentionFactory('agfl', {'heads': 2}, historical=True)).double().eval()
     old_rng = torch.get_rng_state().clone()
     torch.manual_seed(42)
     current = build(options).double().eval()
@@ -208,10 +209,11 @@ def test_every_attention_receives_fused_tokens_and_keeps_checkpoint_hooks(attent
 
 
 def test_full_recipe_adds_only_one_small_projection_and_keeps_seven_tokens():
-    options = {**deepcopy(EEG_DEFAULTS), 'attention_axis': 'time', 'temp_kernel': 125}
+    options = {**{k: v for k, v in deepcopy(EEG_DEFAULTS).items()
+                 if k not in {'electrode_dim', 'electrode_architecture'}}, 'attention_axis': 'time', 'temp_kernel': 125}
     data = {'modality': 'eeg', 'channels': 22, 'samples': 1000, 'num_classes': 4}
-    old = get_model_spec('eegnet').build(options, data, 'agfl', {'heads': 4})
-    new = get_model_spec('eegnet').build({**options, 'temporal_statistics': 'mean_logvar'}, data, 'agfl', {'heads': 4})
+    old = get_model_spec('eegnet').rebuild_saved(options, data, 'agfl', {'heads': 4})
+    new = get_model_spec('eegnet').rebuild_saved({**options, 'temporal_statistics': 'mean_logvar'}, data, 'agfl', {'heads': 4})
     assert new.num_tokens == old.num_tokens == 7
     assert new.fc.in_features == old.fc.in_features == 224
     assert new.temporal_statistics.bin_edges == (0, 142, 285, 428, 571, 714, 857, 1000)

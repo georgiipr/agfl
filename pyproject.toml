@@ -30,7 +30,7 @@ agfl = "agfl.cli:main"
 include = ["agfl*"]
 
 [tool.setuptools.package-data]
-"agfl.presets" = ["*.json"]
+"agfl.presets" = ["*.json", "archive/eeg_temporal/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

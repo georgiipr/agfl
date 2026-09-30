@@ -1,3 +1,5 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # Retired experiment: EEGNet power features and EMA
 
 **Completed and withdrawn from the active recipe.** This experiment reduced

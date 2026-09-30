@@ -7,6 +7,8 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
+from .temporal_gate import RelativeTemporalBias, TokenOutputGate, validate_options
+
 
 
 def sparsity_schedule(layer_idx, depth, smax=0.2, smin=0.8, alpha=3.0):
@@ -135,8 +137,8 @@ class GraphFilter(nn.Module):
         if type(options['learnable_coefficients']) is not bool:
             raise ValueError('learnable_coefficients must be a boolean')
         self.conditioning = options.get('coefficient_conditioning', 'static')
-        if self.conditioning not in {'static', 'trial_power', 'token_contrast'}:
-            raise ValueError('coefficient_conditioning must be static, trial_power or token_contrast')
+        if self.conditioning not in {'static', 'trial_power', 'token_contrast', 'feature_contrast'}:
+            raise ValueError('coefficient_conditioning must be static, trial_power, token_contrast or feature_contrast')
         self.conditioning_scale = options.get('coefficient_conditioning_scale', 0.5)
         if (isinstance(self.conditioning_scale, bool)
                 or not isinstance(self.conditioning_scale, (int, float))
@@ -147,8 +149,8 @@ class GraphFilter(nn.Module):
                 raise ValueError(f'{self.conditioning} conditioning requires identity activation and learnable coefficients')
             if dim < 2:
                 raise ValueError(f'{self.conditioning} conditioning requires at least two features per head')
-        if self.conditioning == 'token_contrast' and options['K'] < 1:
-            raise ValueError('token_contrast conditioning requires K >= 1')
+        if self.conditioning in {'token_contrast', 'feature_contrast'} and options['K'] < 1:
+            raise ValueError(f'{self.conditioning} conditioning requires K >= 1')
         if options['coefficient_init'] == 'zeros':
             if options['coefficient_activation'] == 'relu':
                 raise ValueError('Zero-initialized ReLU coefficients cannot learn; use a nonzero coefficient_init')
@@ -192,9 +194,13 @@ class GraphFilter(nn.Module):
         # No bias: alpha_logits already supplies each hop's static offset.
         # The zero map preserves the selected static recipe at initialization,
         # including RNG state and the initialization of every later parameter.
-        descriptor_dim = 2 * dim if self.conditioning == 'token_contrast' else dim
-        self.coefficient_gate = (_ZeroLinear(descriptor_dim, taps, bias=False)
+        descriptor_dim = 2 * dim if self.conditioning in {'token_contrast', 'feature_contrast'} else dim
+        # Feature routing learns a separate hop mixture for each head-local
+        # output feature; flattening is feature-major, then hop-major.
+        gate_outputs = dim * taps if self.conditioning == 'feature_contrast' else taps
+        self.coefficient_gate = (_ZeroLinear(descriptor_dim, gate_outputs, bias=False)
                                  if self.conditioning != 'static' else None)
+        self.output_gate = TokenOutputGate(dim) if options.get('output_gate', False) else None
 
     def _static_coefficients(self):
         activations = {'identity': lambda x: x, 'relu': F.relu, 'sigmoid': torch.sigmoid,
@@ -205,21 +211,22 @@ class GraphFilter(nn.Module):
         """Effective coefficients for these head-local value features.
 
         Static/trial-power coefficients have axes [batch, hop]; token-contrast
-        coefficients have axes [batch, token, hop]. Token routing redistributes
-        the hop mixture without changing its sum. Neither descriptor uses batch
-        statistics, labels, caches or learnable normalization.
+        coefficients have axes [batch, token, hop]. Feature-contrast adds a
+        feature axis before hop: [batch, token, feature, hop]. Both redistribute
+        the hop mixture without changing its sum (per feature when applicable).
+        No descriptor uses batch statistics, labels, caches or learned normalization.
         """
         alpha = self._static_coefficients().unsqueeze(0).expand(values.shape[0], -1)
         if self.coefficient_gate is None:
             return alpha
-        if self.conditioning == 'token_contrast':
+        if self.conditioning in {'token_contrast', 'feature_contrast'}:
             if first_hop is None:
                 if graph is None:
-                    raise ValueError('token_contrast coefficients require graph or first_hop')
+                    raise ValueError(f'{self.conditioning} coefficients require graph or first_hop')
                 first_hop = tuple(propagate(graph, values, 1, self.options['agfl_variant'],
                                             self.options['hop_normalization']))[1]
             if first_hop.shape != values.shape:
-                raise ValueError('token_contrast first_hop must match value dimensions')
+                raise ValueError(f'{self.conditioning} first_hop must match value dimensions')
             with torch.autocast(device_type=values.device.type, enabled=False):
                 working = values if values.dtype == torch.float64 else values.float()
                 # Promote separately: even finite half-precision operands can
@@ -229,8 +236,12 @@ class GraphFilter(nn.Module):
                     F.layer_norm(working, (values.shape[-1],), eps=1e-5),
                     F.layer_norm(contrast, (values.shape[-1],), eps=1e-5)), dim=-1)
                 routed = F.linear(descriptor, self.coefficient_gate.weight.to(working.dtype)).tanh()
+                base = alpha.to(working.dtype).unsqueeze(1)
+                if self.conditioning == 'feature_contrast':
+                    routed = routed.reshape(*values.shape, self.alpha_logits.numel())
+                    base = base.unsqueeze(2)
                 delta = (self.conditioning_scale / 2) * (routed - routed.mean(dim=-1, keepdim=True))
-                coefficients = alpha.to(working.dtype).unsqueeze(1) + delta
+                coefficients = base + delta
             return coefficients.to(self.alpha_logits.dtype)
         # Squaring float16 values before promotion can overflow even when all
         # inputs are finite. Keep descriptor and gate arithmetic in float32
@@ -244,7 +255,7 @@ class GraphFilter(nn.Module):
         return coefficients.to(self.alpha_logits.dtype)
 
     def forward(self, graph, values):
-        if self.conditioning == 'token_contrast':
+        if self.conditioning in {'token_contrast', 'feature_contrast'}:
             # Reuse exactly the propagated features being mixed. No duplicate
             # graph construction, extra graph hop, or retained autograd cache.
             hops = tuple(propagate(graph, values, self.options['K'], self.options['agfl_variant'],
@@ -253,9 +264,11 @@ class GraphFilter(nn.Module):
             out = None
             for hop, propagated in enumerate(hops):
                 projected = self.W[hop](propagated) if self.projection == 'separate' else self.W(propagated)
-                term = alpha[:, :, hop, None].to(projected.dtype) * projected
+                coefficient = (alpha[..., hop] if self.conditioning == 'feature_contrast'
+                               else alpha[:, :, hop, None])
+                term = coefficient.to(projected.dtype) * projected
                 out = term if out is None else out + term
-            return out
+            return self.output_gate(out, values, hops[1]) if self.output_gate is not None else out
         # Preserve the historical scalar-per-hop arithmetic for static runs.
         alpha = self._static_coefficients() if self.coefficient_gate is None else self.coefficient_values(values)
         out = None
@@ -271,6 +284,7 @@ class GraphFilter(nn.Module):
 class AGFL(nn.Module):
     def __init__(self, options):
         super().__init__()
+        validate_options(options)
         self.options = options
         dim, heads = options['dim'], options['heads']
         if dim % heads:
@@ -308,10 +322,15 @@ class AGFL(nn.Module):
         ])
         self.filters = nn.ModuleList([GraphFilter(self.dim_h, options) for _ in range(heads)])
         self.proj = nn.Linear(dim, dim)
+        self.temporal_bias = RelativeTemporalBias(heads) if options.get('temporal_bias', False) else None
         self.last_adj = None
 
     def construct_graph(self, head, q, k, layer_idx, depth):
         raw, scores = self.builders[head](q, k)
+        if self.temporal_bias is not None:
+            if getattr(self, 'token_axis', 'time') != 'time':
+                raise ValueError('temporal_bias requires time tokens, not electrode tokens')
+            scores = scores + self.temporal_bias(scores.shape[-1])[head].to(scores.dtype)
         stage = self.options['top_k_stage']
         selection = raw if stage == 'raw_scores' else scores.softmax(-1) if stage == 'softmax' else scores
         count = retained_count(self.options['top_k'], scores.shape[-1], layer_idx, depth, self.options['top_k_schedule'])

@@ -1,3 +1,5 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # EEGNet + AGFL improvement study: BCI Competition IV-2a
 
 The target is at least **75% mean held-out accuracy across all nine subjects**

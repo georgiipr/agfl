@@ -1,3 +1,5 @@
+> **Archived temporal EEG experiment.** These launch instructions are retired as of 28 September 2026. Saved results retain their original interpretation. Use [the inter-channel EEG workflow](eeg_interchannel.md) for all new EEG runs.
+
 # Fixed EEGNet comparison: original AGFL, conditioned AGFL and Linformer
 
 **Completed:** static and conditioned AGFL both reached 84.44% mean test
