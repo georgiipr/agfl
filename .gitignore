@@ -30,3 +30,9 @@ analysis/
 *.log
 slurm-*.out
 *.sbatch
+
+# Local development instructions, tests and documentation
+/AGENTS.md
+/agents.md
+/tests/
+/docs/

@@ -19,8 +19,7 @@ patches. BCI Competition IV 2a participants are trained individually.
 | Attention settings | `attention_options` |
 
 MHA is the base attention. There is no no-attention option. Each backbone has
-separate EEG and ECG variants. See [model structure](docs/model_attention_structure.md)
-and [attention mathematics](docs/mathematics.md).
+separate EEG and ECG variants.
 
 ## Environment
 
@@ -47,7 +46,41 @@ PCA and t-SNE use the core dependencies; UMAP additionally needs the `umap`
 extra. Development tests and `pytest` are not prerequisites for launching
 experiments or generating reports.
 
-## Dataset locations
+## Download BCI Competition IV 2a
+
+1. Open the [official competition page](https://www.bbci.de/competition/iv/#download),
+   review the dataset attribution terms and agree to them.
+2. In the [download area](https://bbci.de/competition/iv/download/), choose
+   **Data sets 2a → GDF files zipped** (about 420 MB). The archive is
+   [`BCICIV_2a_gdf.zip`](https://www.bbci.de/competition/download/competition_iv/BCICIV_2a_gdf.zip).
+3. Put the extracted `.gdf` recordings directly in a folder named `ml`
+   **beside the AGFL checkout**. From the repository root, replace the archive
+   path below with the location of your downloaded file:
+
+```bash
+mkdir -p ../ml
+unzip -j /path/to/BCICIV_2a_gdf.zip '*.gdf' -d ../ml
+```
+
+The `-j` option removes archive subdirectories so the loader can find
+`../ml/A01T.gdf` directly. The default EEG experiments need `A01T.gdf` through
+`A09T.gdf`; a single-subject run needs only that subject's recording.
+
+For T-to-E session-transfer evaluation, also keep `A01E.gdf` through
+`A09E.gdf`. Download **Data sets 2a → labels** from the official
+[evaluation-labels page](https://www.bbci.de/competition/iv/results/#labels)
+([`true_labels.zip`](https://www.bbci.de/competition/iv/results/ds2a/true_labels.zip))
+and extract the evaluation label files into the same `ml` folder:
+
+```bash
+unzip -j /path/to/true_labels.zip '*E.mat' -d ../ml
+```
+
+These `A01E.mat` through `A09E.mat` files must contain the official `classlabel`
+variable. The loader reads signals from GDF recordings and evaluation labels
+from these MAT files. T-only experiments do not need the evaluation labels.
+
+### Dataset locations
 
 Commands below run from the repository root. The default relative layout is:
 
@@ -55,15 +88,19 @@ Commands below run from the repository root. The default relative layout is:
 workspace/
   AGFL/
   ml/
-    A01T.gdf ... A09T.gdf
+    A01T.gdf ... A09T.gdf    required for all-subject T-session experiments
+    A01E.gdf ... A09E.gdf    also required for T-to-E evaluation
+    A01E.mat ... A09E.mat    official labels for T-to-E evaluation
   mit-bih-arrhythmia-database-1.0.0/
     *.hea, *.dat, *.atr
 ```
 
 Raw datasets are not distributed with the repository. Set `data.data_dir` to
-your own location; paths resolve from the working directory. T-to-E EEG
-evaluation also needs `A01E.gdf` through `A09E.gdf` and official `AxxE.mat`
-files containing `classlabel`. See [dataset protocols](docs/data_audit.md).
+your own location; paths resolve from the working directory. With this layout,
+use `--set data.data_dir=../ml`. If labels are stored separately, also set
+`--set data.labels_dir=../official-labels` to their directory. Keep the datasets
+on the compute machine where training runs, using the same relative layout or
+an explicit path override.
 
 ## Inspect the configuration
 
@@ -101,8 +138,8 @@ python main.py run --preset eeg --model eegnet --attention agfl --seeds 0 \
 Change `--model` or `--attention` independently. EEGNet defaults to its
 `spatial_fusion` electrode layout. Add
 `--set model_options.electrode_architecture=pre_spatial` to place attention
-before its spatial convolution; [layout details](docs/eegnet_pre_spatial.md)
-describe the difference.
+before its spatial convolution. This applies electrode attention at each time
+step instead of using the pooled electrode features of `spatial_fusion`.
 
 Conformer with AGFL on the MIT-BIH binary ECG task:
 
@@ -132,7 +169,7 @@ For custom experiments, supply JSON or TOML with `--config experiment.json`.
 A single run specifies `model`, `attention`, `dataset`, `data`, `model_options`,
 `attention_options`, `training`, `seeds` and `output_dir` as needed. A sweep
 contains a `base` object and an `experiments` list of overrides. Specialized
-presets and fixed-study launchers are retained for reproducibility; the common
+presets are retained for reproducibility; the common
 commands above do not depend on a previous experiment's output files.
 
 ## EEG session-transfer evaluation
@@ -194,10 +231,6 @@ rsync -av --progress \
   ./downloaded-reports/eegnet-eeg/
 ```
 
-Full details: [visualization](docs/visualization.md),
-[result storage and recovery](docs/result_sessions.md),
-[statistical analysis](docs/statistics.md).
-
 ## Reruns and reproducibility
 
 `run` and `sweep` overwrite matching seed artifacts by default. Interrupted
@@ -254,10 +287,8 @@ agfl/presets/         executable experiment configurations
 agfl/engine.py        shared training and evaluation
 agfl/analysis.py      saved-result aggregation
 agfl/visualization/   result figures and checkpoint diagnostics
-tests/               development checks and independent references
-docs/                reusable technical documentation
 ```
 
-See the [documentation index](docs/README.md) for model, data and extension
-contracts. Generated results and local experiment notes belong outside the
-public documentation tree.
+Generated results and local experiment notes are excluded from the public
+repository. Model, attention and dataset implementations live in the separate
+packages shown above.
