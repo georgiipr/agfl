@@ -239,8 +239,10 @@ sbatch --partition=gpu --gpus=1 --mem=16G --nodes=1 --ntasks=1 \
 Choose resources and a time limit appropriate for the selected experiment;
 the example allocation is not an estimate of its total runtime. Generate
 diagnostics and result plots after training with the separate commands above.
-Existing `.sbatch` files describe fixed experiment matrices; inspect their
-settings and environment overrides before submitting them.
+Keep experiment-specific `.sbatch` files outside the repository. Submit an
+external launcher from the repository root, using
+`sbatch /path/to/jobs/AGFL/experiment.sbatch`, so `SLURM_SUBMIT_DIR` points to
+the checkout. Inspect its settings and environment overrides before submission.
 
 ## Repository structure
 

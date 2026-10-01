@@ -37,8 +37,11 @@ These instructions apply to this repository and all its subdirectories.
   and report unfavorable results as well as favorable ones.
 - Preserve saved configuration, split, checkpoint, and source provenance. Make
   experimental changes explicit instead of silently reinterpreting old runs.
-- Use interactive **`salloc`** launches. Do not create `.sbatch` files unless
-  the user explicitly requests that workflow again.
+- Keep experiment-specific **`.sbatch`** launchers outside this repository,
+  in the user's `Downloads/cluster-jobs/AGFL/` folder. Keep only the latest
+  launcher there; use that location for future batch-launcher work.
+- Submit external launchers from the cluster's AGFL checkout so
+  `SLURM_SUBMIT_DIR` points to the project. Keep public launch examples portable.
 - Use the existing Python environment. Do not add libraries or make `pytest`
   or the development test suite a prerequisite for training or plotting.
   Development tests remain separate from experiment launches.

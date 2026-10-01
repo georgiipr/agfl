@@ -29,3 +29,4 @@ analysis/
 /local-notes/
 *.log
 slurm-*.out
+*.sbatch

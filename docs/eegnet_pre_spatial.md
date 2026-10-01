@@ -60,14 +60,5 @@ python main.py analyze results/eegnet-pre-spatial --plots
 Diagnostic displays average the per-time-step electrode graphs back to one
 map per trial. Sensor-routing weights do not establish anatomical connectivity.
 
-## Retained fixed-study launcher
-
-`eegnet_A03_A04_A09_pre_spatial.sbatch` defines a fixed EEGNet comparison of
-AGFL and MHA on A03/A04/A09 with five seeds. It is separate from the general
-CLI examples above. Inspect the launcher and its preset before submission;
-they specify resource requests, preflight checks, resume behavior and reporting.
-Its `AGFL_VENV`, `AGFL_DATA_DIR` and `AGFL_OUTPUT_DIR` variables configure the
-environment and paths without embedding an individual's machine layout.
-
 Common environment, transfer and session instructions are in the
 [README](../README.md) and [result guide](result_sessions.md).
