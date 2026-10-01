@@ -18,33 +18,24 @@ patches. BCI Competition IV 2a participants are trained individually.
 | Backbone settings | `model_options` |
 | Attention settings | `attention_options` |
 
-MHA is the base attention. There is no no-attention option. Each backbone has
-separate EEG and ECG variants.
+MHA is the base attention. Each backbone has separate EEG and ECG variants.
 
 ## Environment
 
-Use **Python 3.12 or newer**. Reuse an existing compatible environment when
-available. For a fresh environment, from the repository root:
+Use **Python 3.12 or newer**. Run the commands in this guide from the
+repository root. Create and activate a virtual environment, then install the
+package and plotting dependencies:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
-```
-
-Dependencies are declared in `pyproject.toml`. GPU runs require a CUDA-enabled
-PyTorch installation compatible with the compute machine. For CPU execution,
-add `--set device=cpu` to a training command.
-
-Plotting uses the optional `plots` extra. If it is not already installed:
-
-```bash
 python -m pip install -e '.[plots]'
 ```
 
-PCA and t-SNE use the core dependencies; UMAP additionally needs the `umap`
-extra. Development tests and `pytest` are not prerequisites for launching
-experiments or generating reports.
+For training without figures, `python -m pip install -e .` is sufficient.
+The supplied presets use CUDA and require a compatible GPU and CUDA-enabled
+PyTorch installation. For CPU execution, add `--set device=cpu` to a training
+command and use `--device cpu` for checkpoint diagnostics.
 
 ## Download BCI Competition IV 2a
 
@@ -98,9 +89,7 @@ workspace/
 Raw datasets are not distributed with the repository. Set `data.data_dir` to
 your own location; paths resolve from the working directory. With this layout,
 use `--set data.data_dir=../ml`. If labels are stored separately, also set
-`--set data.labels_dir=../official-labels` to their directory. Keep the datasets
-on the compute machine where training runs, using the same relative layout or
-an explicit path override.
+`--set data.labels_dir=../official-labels` to their directory.
 
 ## Inspect the configuration
 
@@ -135,13 +124,11 @@ python main.py run --preset eeg --model eegnet --attention agfl --seeds 0 \
   --output-dir results/eegnet-subject
 ```
 
-Change `--model` or `--attention` independently. EEGNet defaults to its
-`spatial_fusion` electrode layout. Add
-`--set model_options.electrode_architecture=pre_spatial` to place attention
-before its spatial convolution. This applies electrode attention at each time
-step instead of using the pooled electrode features of `spatial_fusion`.
+Change `--model` or `--attention` independently. Use `--set KEY=VALUE` for
+other settings, for example `--set training.epochs=100`.
 
-Conformer with AGFL on the MIT-BIH binary ECG task:
+For ECG, place the MIT-BIH Arrhythmia Database `.hea`, `.dat` and `.atr` files
+in `../mit-bih-arrhythmia-database-1.0.0`, then launch Conformer with AGFL:
 
 ```bash
 python main.py run --preset ecg --model conformer --attention agfl \
@@ -163,14 +150,12 @@ python main.py sweep --preset eeg-comparison --model eegnet \
 This compares all five attentions on the selected backbone: nine subjects ×
 five seeds × five attentions = 225 fits. Add `--seeds 0` and
 `--set 'data.subjects=[1]'` for a smaller comparison. Use `ecg-comparison` for
-ECG, or `eeg-ablations` / `ecg-ablations` for the supplied AGFL ablations.
+ECG.
 
 For custom experiments, supply JSON or TOML with `--config experiment.json`.
 A single run specifies `model`, `attention`, `dataset`, `data`, `model_options`,
 `attention_options`, `training`, `seeds` and `output_dir` as needed. A sweep
-contains a `base` object and an `experiments` list of overrides. Specialized
-presets are retained for reproducibility; the common
-commands above do not depend on a previous experiment's output files.
+contains a `base` object and an `experiments` list of overrides.
 
 ## EEG session-transfer evaluation
 
@@ -179,17 +164,17 @@ T-session trials. For training/validation on T and held-out testing on E:
 
 ```bash
 python main.py run --preset eeg-session --model eegnet --attention agfl \
-  --set data.data_dir=../ml --set data.labels_dir=../official-labels \
+  --set data.data_dir=../ml \
   --output-dir results/eegnet-session
 ```
 
-Omit `data.labels_dir` when the official label files are beside the GDF files.
-Missing labels are an error; the loader does not infer evaluation labels.
+This uses the evaluation labels placed beside the GDF files in the download
+instructions. If labels are elsewhere, add `--set data.labels_dir=/path/to/labels`.
 
 ## Results and plots
 
 Pass a session root to `--output-dir`, for example `results/eegnet-eeg`.
-The framework separates downloadable evidence from training artifacts:
+Results are organized as follows:
 
 ```text
 results/eegnet-eeg/
@@ -197,7 +182,7 @@ results/eegnet-eeg/
     runs/              settings, splits, histories, predictions, metrics
     analysis/          summary tables and result figures
     diagnostics/       signal, embedding and attention figures
-  artifacts/           canonical runs and model checkpoints
+  artifacts/           training runs and model checkpoints
 ```
 
 After training, use the same session path for the following two independent
@@ -222,73 +207,11 @@ checkpoint diagnostic has an `index.md` under `report/diagnostics/`.
 Omit `--plots` for tables only. Add `--report` to a training command to run
 both reporting steps automatically after training.
 
-Download only the session's `report/` folder. For example, replace the SSH
-destination and remote path with those of your compute machine:
-
-```bash
-rsync -av --progress \
-  user@compute-host:/path/to/AGFL/results/eegnet-eeg/report/ \
-  ./downloaded-reports/eegnet-eeg/
-```
-
-## Reruns and reproducibility
+## Rerunning an experiment
 
 `run` and `sweep` overwrite matching seed artifacts by default. Interrupted
 fits restart from epoch 1; manual deletion is unnecessary. Add
 `--skip-completed` to retain completed fits whose recorded identities match.
-This is not an optimizer-state resume. Keep source, dependencies and dataset
-content stable during a study, and use a new output directory for a changed
-scientific configuration. Regenerate reports after replacing runs.
-
-Saved records include resolved settings, source/package provenance, data
-fingerprints, split IDs and checkpoint selection. Validation selects
-checkpoints; test scores do not select epochs. Compare attentions within the
-same backbone, preprocessing, split and training protocol. Different layouts
-or preprocessing settings are separate experiments, not an attention-only
-comparison.
-
-## Cluster execution
-
-Run training on the compute machine after activating its Python environment.
-For Slurm, an interactive GPU allocation can be requested with:
-
-```bash
-salloc --partition=gpu --gpus=1 --mem=16G --nodes=1 --ntasks=1 \
-  --cpus-per-task=4 --time=04:00:00 srun --pty bash -l
-```
-
-Partition names and resource limits depend on the cluster. Run the common
-training commands after the allocation is granted.
-
-Alternatively, from the repository root with the environment active, queue a
-common training command without a separate batch file:
-
-```bash
-sbatch --partition=gpu --gpus=1 --mem=16G --nodes=1 --ntasks=1 \
-  --cpus-per-task=4 --time=04:00:00 --output=agfl-%j.log \
-  --wrap='srun python main.py run --preset eeg --model eegnet --attention agfl --set data.data_dir=../ml --output-dir results/eegnet-eeg'
-```
-
-Choose resources and a time limit appropriate for the selected experiment;
-the example allocation is not an estimate of its total runtime. Generate
-diagnostics and result plots after training with the separate commands above.
-Keep experiment-specific `.sbatch` files outside the repository. Submit an
-external launcher from the repository root, using
-`sbatch /path/to/jobs/AGFL/experiment.sbatch`, so `SLURM_SUBMIT_DIR` points to
-the checkout. Inspect its settings and environment overrides before submission.
-
-## Repository structure
-
-```text
-agfl/models/          backbones and their EEG/ECG variants
-agfl/attention/       independent attention implementations
-agfl/datasets/        loaders, sample identities and split handling
-agfl/presets/         executable experiment configurations
-agfl/engine.py        shared training and evaluation
-agfl/analysis.py      saved-result aggregation
-agfl/visualization/   result figures and checkpoint diagnostics
-```
-
-Generated results and local experiment notes are excluded from the public
-repository. Model, attention and dataset implementations live in the separate
-packages shown above.
+This does not resume unfinished optimizer states. Use a new output directory
+to keep results from different configurations. Regenerate reports after
+replacing runs.
