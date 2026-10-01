@@ -5,6 +5,9 @@ from torch import nn
 from .._shared.layers import ElectrodeIdentity, ElectrodeReadout, PositionalEncoding, positive_options
 
 
+ELECTRODE_ARCHITECTURES = ('compact', 'spatial_fusion', 'pre_spatial')
+
+
 class EEGNetBackbone(nn.Module):
     def __init__(self, options, metadata, attention, *, electrode_tokens):
         super().__init__()
@@ -20,11 +23,29 @@ class EEGNetBackbone(nn.Module):
             raise ValueError('EEGNet attention_dropout must lie in [0, 1)')
         if options['initialization'] not in {'pytorch', 'xavier'}:
             raise ValueError('EEGNet initialization must be pytorch or xavier')
+        architecture = options.get('electrode_architecture', 'compact')
+        if architecture not in ELECTRODE_ARCHITECTURES:
+            raise ValueError('EEGNet electrode_architecture must be compact, spatial_fusion or pre_spatial')
+        # pre_spatial: the selected attention mixes the electrodes at every time
+        # step of the shared temporal-filter output, BEFORE EEGNet's own
+        # full-channel depthwise spatial convolution. Everything reaching the
+        # classifier passes through that spatial filter, ELU, pooling and the
+        # separable convolution; there is no parallel per-electrode path.
+        self.pre_spatial = electrode_tokens and architecture == 'pre_spatial'
+        self.compact_electrodes = (electrode_tokens and not self.pre_spatial
+                                   and options.get('electrode_dim') is not None)
+        if self.compact_electrodes:
+            positive_options(options, 'electrode_dim')
+        self.spatial_fusion = electrode_tokens and architecture == 'spatial_fusion'
+        if self.spatial_fusion and not self.compact_electrodes:
+            raise ValueError('EEGNet spatial_fusion requires a positive electrode_dim')
         def batch_norm(features):
             return nn.BatchNorm2d(features, momentum=momentum, eps=eps)
         self.token_axis = 'electrode' if electrode_tokens else 'time'
         f1, expanded, f2 = options['f1'], options['f1'] * options['d'], options['f2']
-        channels = 1 if electrode_tokens else metadata['channels']
+        # Compact/fusion electrode encoders convolve one electrode at a time; the
+        # temporal layout and pre_spatial keep the full-channel spatial filter.
+        channels = 1 if electrode_tokens and not self.pre_spatial else metadata['channels']
         self.block1 = nn.Sequential(nn.Conv2d(1, f1, (1, options['temp_kernel']), padding='same', bias=False), batch_norm(f1))
         self.block2 = nn.Sequential(
             nn.Conv2d(f1, expanded, (channels, 1), groups=f1, bias=False),
@@ -36,19 +57,15 @@ class EEGNetBackbone(nn.Module):
         steps = metadata['samples'] // options['pk1'] // options['pk2']
         if steps < 1:
             raise ValueError('EEGNet pooling leaves no temporal samples; reduce pk1/pk2')
-        self.compact_electrodes = electrode_tokens and options.get('electrode_dim') is not None
-        if self.compact_electrodes:
-            positive_options(options, 'electrode_dim')
-        architecture = options.get('electrode_architecture', 'compact')
-        if architecture not in ('compact', 'spatial_fusion'):
-            raise ValueError('EEGNet electrode_architecture must be compact or spatial_fusion')
-        self.spatial_fusion = electrode_tokens and architecture == 'spatial_fusion'
-        if self.spatial_fusion and not self.compact_electrodes:
-            raise ValueError('EEGNet spatial_fusion requires a positive electrode_dim')
-        dim = (options['electrode_dim'] if self.compact_electrodes else
-               f2 * steps if electrode_tokens else f2)
+        dim = (f1 if self.pre_spatial else options['electrode_dim'] if self.compact_electrodes
+               else f2 * steps if electrode_tokens else f2)
         self.num_tokens = metadata['channels'] if electrode_tokens else steps
-        if self.compact_electrodes:
+        if self.pre_spatial:
+            # Tokens are the f1 temporal-filter outputs of one electrode at one
+            # time step; the identity embedding lets the graph depend on the
+            # sensor, not only on instantaneous amplitudes.
+            self.electrode_position = ElectrodeIdentity(dim, self.num_tokens)
+        elif self.compact_electrodes:
             # The projection sees one electrode only, including its time bins.
             self.electrode_projection = nn.Linear(f2 * steps, dim, bias=False)
             self.electrode_position = ElectrodeIdentity(dim, self.num_tokens)
@@ -60,8 +77,10 @@ class EEGNetBackbone(nn.Module):
         if type(self.attention_residual) is not bool:
             raise ValueError('attention_residual must be boolean')
         # Share each feature's learned electrode filter across pooled time bins.
+        # pre_spatial has no readout: its spatial filter is block2's convolution.
         readout_features = dim if self.compact_electrodes else f2
-        self.spatial_readout = ElectrodeReadout(metadata['channels'], readout_features, options['spatial_readout']) if electrode_tokens else None
+        self.spatial_readout = (ElectrodeReadout(metadata['channels'], readout_features, options['spatial_readout'])
+                                if electrode_tokens and not self.pre_spatial else None)
         self.f2, self.steps = f2, steps
         self.flatten = nn.Flatten()
         if self.spatial_fusion:

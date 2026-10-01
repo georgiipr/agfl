@@ -87,8 +87,11 @@ def check_electrode_models(configs):
             def capture(key):
                 def hook(layer, args, output):
                     inputs = args[0]
+                    # pre_spatial EEGNet presents the two synthetic trials as
+                    # 2 x 1000 electrode sets (one per time step); the node axis
+                    # must still hold exactly the 22 electrodes.
                     if (layer.token_axis != 'electrode' or layer.num_tokens != 22
-                            or inputs.ndim != 3 or tuple(inputs.shape[:2]) != (2, 22)
+                            or inputs.ndim != 3 or inputs.shape[0] % 2 or inputs.shape[1] != 22
                             or output.shape != inputs.shape):
                         raise ValueError(f'{name}/{attention}/{key}: attention must consume [B,22,D]')
                     observed[key] = {'token_axis': layer.token_axis,

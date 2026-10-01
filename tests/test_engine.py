@@ -226,8 +226,9 @@ def test_active_seed_cannot_be_overwritten_and_lock_releases_after_abort(tmp_pat
 def test_defaults_keep_five_seeds_and_separate_domain_budgets():
     eeg, ecg = resolve_config({'dataset': 'eeg'}), resolve_config({'dataset': 'ecg'})
     assert eeg['seeds'] == [0, 1, 2, 3, 4]
-    assert eeg['training']['epochs'] == 250
-    assert ecg['training']['epochs'] == 50
+    assert eeg['training']['epochs'] == 500 and eeg['training']['loss'] == 'cross_entropy'
+    assert eeg['training']['learning_rate'] == 1e-3 and eeg['training']['checkpoint_criterion'] == 'loss'
+    assert ecg['training']['epochs'] == 50 and ecg['training']['loss'] == 'focal'
     assert eeg['model_variant'] == 'eeg' and ecg['model_variant'] == 'ecg'
     with pytest.raises(ValueError, match='Unknown'):
         resolve_config({'training': {'learnng_rate': .001}})

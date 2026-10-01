@@ -8,7 +8,7 @@ import numpy as np
 from agfl.storage import write_json
 from agfl.result_paths import resolve_artifact_run
 from .common import FigureWriter, slug
-from .maps import mixer_map, map_statistics
+from .maps import mixer_map, per_trial_maps, map_statistics
 
 
 def selected_indices(labels, indices, limit, seed):
@@ -808,7 +808,14 @@ def diagnose_run(run_dir, output_dir, *, device='cpu', partition='validation', m
                     writer.skip(name, kind)
                 return
             array = matrix.detach().cpu().numpy()
+            # Sparsity/entropy describe the actual per-example maps. EEGNet
+            # pre_spatial forms one graph per time step of each trial; those
+            # rows are averaged back to one map per trial for the figures.
             statistics = map_statistics(array)
+            if batch_labels is not None and len(array) != len(batch_labels):
+                reduced = per_trial_maps(array, len(batch_labels))
+                if len(reduced) != len(array):
+                    array, kind = reduced, kind + '; mean over time steps within each trial'
             count = len(array)
             if batch_labels is None or len(batch_labels) != count:
                 raise ValueError('Graph rows do not align with the diagnostic trial labels')

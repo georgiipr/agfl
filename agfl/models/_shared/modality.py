@@ -17,9 +17,15 @@ def validate_attention_domain(modality, model_options, attention_options):
             heads = attention_options.get('heads', 4)
             if type(heads) is not int or heads < 1 or dim % heads:
                 raise ValueError('EEGNet electrode_dim must be divisible by attention heads')
-        if ('electrode_architecture' in model_options
-                and model_options['electrode_architecture'] not in ('compact', 'spatial_fusion')):
-            raise ValueError('EEGNet electrode_architecture must be compact or spatial_fusion')
+        architecture = model_options.get('electrode_architecture')
+        if architecture is not None and architecture not in ('compact', 'spatial_fusion', 'pre_spatial'):
+            raise ValueError('EEGNet electrode_architecture must be compact, spatial_fusion or pre_spatial')
+        if architecture == 'pre_spatial':
+            # Attention runs on the f1 temporal-filter outputs of every electrode.
+            f1, heads = model_options.get('f1', 16), attention_options.get('heads', 4)
+            if type(f1) is not int or f1 < 1 or type(heads) is not int or heads < 1 or f1 % heads:
+                raise ValueError('EEGNet pre_spatial attention uses model_options.f1 features per electrode; '
+                                 'f1 must be divisible by attention_options.heads')
         if model_options.get('temporal_statistics', 'mean') != 'mean':
             raise ValueError('The retired EEGNet power experiment is available only for saved-checkpoint replay')
     elif modality == 'ecg' and model_options.get('attention_axis', 'time') != 'time':

@@ -82,8 +82,9 @@ def test_subjects_expand_without_mutating_config_or_loading_data():
 def test_individual_subjects_reject_pooled_protocol_and_filter_leakage():
     with pytest.raises(ValueError, match='individually'):
         resolve_experiments({'dataset': 'eeg', 'split': {'protocol': 'group'}})
-    with pytest.raises(ValueError, match='held-out trials'):
-        resolve_experiments({'dataset': 'eeg', 'data': {'filter_scope': 'run'}})
+    with pytest.raises(ValueError, match='continuous'):
+        resolve_experiments({'dataset': 'eeg', 'data': {'filter_scope': 'continuous'}})
+    assert all(r['data']['filter_scope'] == 'run' for r in resolve_experiments({'dataset': 'eeg'}))
     with pytest.raises(ValueError, match='subject_id'):
         resolve_experiments({'dataset': 'eeg', 'subject_id': 'A02', 'data': {'subjects': [1]}})
 

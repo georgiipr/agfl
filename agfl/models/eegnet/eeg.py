@@ -18,6 +18,18 @@ class EEGModel(EEGNetBackbone):
         check_input(x, self.metadata)
         batch, channels, samples = x.shape
         if self.token_axis == 'electrode':
+            if self.pre_spatial:
+                temporal = self.block1(x.unsqueeze(1))  # [B,F1,C,T]
+                # One node per electrode at every time step; the attention batch
+                # axis is trial-major, row b*T + t belongs to trial b. Attention
+                # sees only the electrode's own temporal-filter outputs.
+                tokens = temporal.permute(0, 3, 2, 1).reshape(batch * samples, channels, -1)
+                mixed = self.attention_dropout(self.attn_blocks[0](self.electrode_position(tokens)))
+                mixed = mixed.reshape(batch, samples, channels, -1).permute(0, 3, 2, 1)
+                signal = temporal + mixed if self.attention_residual else mixed
+                # EEGNet's own route to the classifier: full-channel spatial
+                # filter -> BN -> ELU -> pooling -> separable convolution.
+                return self.fc(self.flatten(self.block3(self.block2(signal))))
             if self.spatial_fusion:
                 # Temporal filters share parameters, not electrode values.
                 # Evaluate the shared BatchNorm exactly once per input batch.

@@ -1,6 +1,6 @@
 # Experiment figures
 
-Current EEG graphs have electrode nodes, enforced before training. The
+EEG graphs have electrode nodes, enforced before training. The
 [inter-channel guide](eeg_interchannel.md) supplies all current training and plot
 commands. EEG diagnostics export labeled per-head and per-class C×C matrices,
 complete directed edge CSV/NPZ files, source-weight scalp maps, scalp connection
@@ -9,11 +9,10 @@ montage coordinates are reported as unavailable; channel matrices remain usable.
 ECG graphs remain temporal. Archived EEG time graphs remain labeled time graphs.
 
 Plotting is an offline operation. It does not run during optimization, choose a new
-checkpoint, or overwrite saved experiment metrics. Commands below are for the
-intended machine; the plotting implementation and supplied tests have not been
-executed locally.
+checkpoint, or overwrite saved experiment metrics. Run checkpoint diagnostics
+on the compute machine with its matching environment and source recordings.
 
-Training reruns now replace matching seed artifacts by default. Rerun analysis
+Training reruns replace matching seed artifacts by default. Rerun analysis
 and checkpoint diagnostics afterwards to refresh exported figures; training does
 not regenerate them automatically unless `--report` is requested.
 
@@ -143,7 +142,7 @@ Diagnostic sampling settings and partitions are separated. These scatterplots
 do not establish that sparsity caused an accuracy change; the declared Top-k
 ablation runs remain the controlled experiments.
 
-## Existing cluster studies and verification
+## Compatibility and saved reports
 
 Existing saved results can be plotted without retraining. Labels show both
 model and attention. Earlier mechanism-as-model runs are reported as Signal
@@ -164,11 +163,6 @@ A downloaded `report/` alone can supply `analyze /path/to/report --plots`;
 checkpoint diagnostics still require the canonical `artifacts/` and recordings
 on the cluster. The plotting command does not turn validation-only candidate
 records into held-out test results.
-
-On the target machine, `python -m pytest tests/test_visualization.py` checks
-prediction/split alignment, matched pairs, non-training diagnostics, map/output
-equivalence, missing entropy semantics, and PNG/PDF output. No local rendering
-or runtime validation was performed here.
 
 Implementation uses [Matplotlib file exports](https://matplotlib.org/stable/api/_as_gen/matplotlib.pyplot.savefig.html),
 [MNE scalp maps](https://mne.tools/stable/generated/mne.viz.plot_topomap.html),

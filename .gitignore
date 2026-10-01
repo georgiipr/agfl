@@ -21,3 +21,11 @@ analysis/
 *.pth
 *.npz
 # Keep NPZ fixtures generated in temporary test directories, not in source.
+
+# Local reports, research notes and scheduler output
+/report/
+/reports/
+/downloaded-reports/
+/local-notes/
+*.log
+slurm-*.out

@@ -72,5 +72,5 @@ with each run for further analysis.
 Implementation references:
 [paired t-test](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ttest_rel.html),
 [Wilcoxon signed-rank test](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wilcoxon.html).
-Numerical checks against SciPy are supplied in `tests/test_analysis.py` and have
-not been run locally.
+Numerical checks against SciPy are supplied in `tests/test_analysis.py` as
+part of the separate development test suite.

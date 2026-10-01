@@ -164,8 +164,8 @@ def _collect(run, config, split, data_dir):
 
     settings = deepcopy(config['data'])
     if (config['dataset'] != 'eeg' or settings['sessions'] != ['T'] or
-            len(settings['subjects']) != 1 or settings['filter_scope'] != 'trial'):
-        raise ValueError('audit-eeg requires one subject, T session only, and trial-local filtering')
+            len(settings['subjects']) != 1 or settings['filter_scope'] not in {'trial', 'run'}):
+        raise ValueError('audit-eeg requires one subject, T session only, and run or trial filtering')
     assignments = saved_assignments(split)
     if data_dir is not None:
         settings['data_dir'] = str(Path(data_dir).expanduser().resolve())
@@ -319,7 +319,8 @@ def report_text(audit):
         lines.append(f"- **{check['status'].upper()} {check['name']}**: {check['detail']}")
     lines += ['', '## Signal measurements', '',
               'Raw amplitudes are in microvolts after GDF calibration, before filtering or normalization. '
-              'Filtered spectra use the saved trial-local bandpass, before normalization. '
+              f"Filtered spectra apply the saved bandpass to each audited window before normalization "
+              f"(descriptive; training used filter_scope={settings['filter_scope']}). "
               'EEG/EOG correlations are descriptive; high correlation alone does not prove an artifact. '
               'Class power summaries are not baseline-relative ERD or evidence of classification accuracy.', '',
               '| Partition | Measured trials | Median trial maximum EEG peak-to-peak (µV) |',

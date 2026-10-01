@@ -22,8 +22,13 @@ def individual_subjects(config):
         raise ValueError('BCI IV 2a subjects must be unique integers in 1..9')
     if config['split']['protocol'] not in {'stratified', 'session'}:
         raise ValueError('BCI IV 2a trains each subject individually: use stratified or session splitting')
-    if config['data']['filter_scope'] != 'trial':
-        raise ValueError('Within-subject training requires filter_scope=trial to avoid filtering across held-out trials')
+    if config['data']['filter_scope'] not in {'run', 'trial'}:
+        # Zero-phase filtering of a whole run is a fixed, label-free linear
+        # operation; windows start 2 s after the previous trial's window ends,
+        # far beyond the 2-30 Hz filter's response. Trial-local filtering is an
+        # explicit alternative (edge transients in the first/last 0.1 s).
+        raise ValueError('Within-subject training filters each run or each trial (filter_scope=run or trial); '
+                         'continuous filtering across run boundaries is retained only for old diagnostics')
     experiments = []
     for subject in sorted(subjects):
         experiment = deepcopy(config)
@@ -40,7 +45,9 @@ def individual_subjects(config):
     "data_dir": "../ml", "subjects": list(range(1, 10)), "sessions": ["T"],
     "labels_dir": None, "window": 1000, "offset_seconds": 0.0,
     "lowcut": 2.0, "highcut": 30.0, "normalization": "train_channel",
-    "artifact_policy": "exclude", "filter_scope": "trial",
+    # All 288 cued trials are kept by default; expert artifact marks are counted
+    # and `exclude` remains an explicit cohort choice. Each run is filtered once.
+    "artifact_policy": "include", "filter_scope": "run",
 }, "Four-class BCI IV 2a motor imagery; one experiment per subject",
     experiment_defaults={'split': {'protocol': 'stratified'}}, expand_experiments=individual_subjects)
 def load_eeg(config):

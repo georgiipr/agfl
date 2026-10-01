@@ -119,9 +119,9 @@ class DatasetTests(unittest.TestCase):
 
     def test_eeg_defaults_match_individual_trial_evaluation(self):
         defaults = get_dataset_spec('eeg').defaults
-        self.assertEqual(defaults['filter_scope'], 'trial')
+        self.assertEqual(defaults['filter_scope'], 'run')
         self.assertEqual(defaults['normalization'], 'train_channel')
-        self.assertEqual(defaults['artifact_policy'], 'exclude')
+        self.assertEqual(defaults['artifact_policy'], 'include')
         self.assertEqual(defaults['offset_seconds'], 0)
         self.assertEqual(defaults['window'], 1000)
 

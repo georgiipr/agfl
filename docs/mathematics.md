@@ -1,34 +1,25 @@
 # AGFL definitions and attention mechanisms
 
-## Required node semantics for current experiments
+## Node semantics
 
-Since 28 September 2026, EEG graph nodes are electrodes in every backbone:
-`X` has shape `[B,C,D]`, and `A` has shape `[B,H,C,C]`. The graph is constructed
-before spatial aggregation in its attention branch. EEGNet uses a shared per-electrode temporal encoder
-and a compact projection to D=32. Its temporal bins are features of each node,
-not nodes. AGFL's propagation and coefficient equations below are unchanged;
-token-conditioned coefficients now index electrodes. The retained K=2 recipe
-mixes V, AV and A²V per electrode before its optional output gate.
+EEG graph nodes are electrodes: attention uses `[B,C,D]` tokens and
+`[B,H,C,C]` graphs, before spatial aggregation in its attention branch.
+EEGNet's `pre_spatial` layout applies those graphs separately to each time step,
+with time folded into the batch dimension. Other electrode layouts include
+temporal features within each node. ECG graph nodes are time steps or patches.
 
-EEGNet's `spatial_fusion` backbone additionally computes conventional depthwise
-spatial filters on the shared temporal stem, before ELU and pooling. Its
-classifier concatenates those `f2 * steps` features with the `electrode_dim`
-attention readout. This backbone change preserves AGFL's equations and graph
-axis, and is applied equally to every chosen attention mechanism.
+Temporal convolution within an EEG electrode is feature extraction; it does
+not make time an EEG attention axis. Temporal-distance biases are rejected for
+EEG because channel-list positions are not temporal distances. Routing graphs
+are sensor-level model associations, not anatomical connectivity. See
+[model layouts](model_attention_structure.md) and [EEG usage](eeg_interchannel.md).
 
-ECG nodes remain time/time patches. Temporal convolution within an EEG electrode
-is feature extraction and does not violate this separation. Temporal-distance
-score bias is rejected for EEG because channel-list indices are not distances.
-Old EEG temporal checkpoints retain their saved axes for reconstruction only.
-See [architecture, launches and plots](eeg_interchannel.md). Routing graphs are
-sensor-level model associations and do not establish anatomical connectivity.
+## Default polynomial layer
 
-## What the existing implementation actually computes
-
-All original models imported `depricated/agfl_layer_0.py`. The top-level
-`agfl_layer.py` was an unused dense variant. The active implementation is now
-archived at `tests/references/agfl.py`; its mathematics remains the
-default in `agfl/attention/agfl/layer.py`.
+The implementation is in [`agfl/attention/agfl/layer.py`](../agfl/attention/agfl/layer.py).
+The following equations describe the split-input, temperature-scaled,
+per-hop-projection configuration. Independent reference code is retained
+in `tests/references/agfl.py`.
 
 For a head with input `X_h` of shape `[B,N,d_h]`:
 
@@ -51,10 +42,10 @@ bias; the final output projection has a bias. Each head has its own temperature,
 coefficients, and projections. Original state-dict names and random
 initialization order are retained so the default layer can load old weights.
 
-The original threshold keeps ties; it can retain more than k edges. This is
+Threshold Top-k keeps ties and can retain more than k edges. This is
 preserved as `top_k_ties="threshold"`. `"exact"` is a separately selected ablation
-with stable index-based tie breaking. The original polynomial and zero
-initialization are not declared incorrect or silently replaced.
+with stable index-based tie breaking. These options define different
+configurations and are recorded explicitly.
 
 The first forward pass at zero coefficients yields only the output projection
 bias. Graph/filter/input gradients through this branch are initially zero,
@@ -63,61 +54,45 @@ initialization property, not evidence that the definition is wrong.
 `coefficient_init="uniform"` and `"lower_order"` are explicit alternatives.
 `"one_hop"` initializes `[0, 1, 0, ...]`, requires `K >= 1` and identity
 activation, and makes the dense polynomial QKV/value-only configuration start
-with the MHA computation. See the
-[cross-model settings and checks](agfl_cross_model_improvements.md).
+with the MHA computation under the matching projection/scaling settings.
 Zero initialization with ReLU activation is rejected because its coefficients
 cannot learn at zero; frozen identity-zero coefficients are also rejected.
 Zero logits remain valid with sigmoid/softmax, whose effective coefficients
 are nonzero.
 
-## Reconciliation with the supplied manuscript
+## Hop order and renormalized propagation
 
-Current reference: `Downloads/NEU_art_submission.pdf`, page 3, equations 1–8,
-checked against the [final submission review](neurips_submission_reference.md).
-The manuscript and active code differ in several ways:
-
-| Item | Active code, preserved default | Manuscript |
-|---|---|---|
-| Similarity | Split input `X_h X_h^T`, learned clamped temperature | Learned Q/K projections and square-root scaling |
-| Values/taps | Input features, separate learned projection per tap | Projected V, scalar tap weights |
-| K convention | Maximum hop order; taps 0 through K | Number of taps; taps 0 through K−1 |
-| Initial coefficients | All zero | Emphasize lower orders |
-| Propagation | Direct polynomial recursion | Also describes feature-norm renormalization |
-
-The manuscript's statement that its `K=1` is one-hop mixing conflicts with its
-own sum from 0 through K−1. This repository consistently uses the original code
-convention: `K=0` is the identity hop, `K=1` includes one graph hop, and `K=2`
-contains three taps. Translate manuscript tap count as `K_paper = K_config + 1`.
+`K` is the maximum graph-hop order. There are `K+1` taps: `K=0` contains the
+identity hop, `K=1` includes one graph hop, and `K=2` contains three taps.
+This convention must be distinguished from a definition of K as the tap count.
 
 `agfl_variant="polynomial"` uses ordinary powers of A. The explicit alternative
 `agfl_variant="renormalized"` uses:
 
-```
+```text
 P_0 = V
 raw_k = A @ P_(k-1)
 P_k = raw_k * (norm(V, dim=-1) / (norm(raw_k, dim=-1) + 1e-6))
 ```
 
-The default normalization axis for this alternative is each token's feature
-axis, exactly as equation 7 specifies. The additive epsilon means preservation
-is approximate at small norms. Zero vectors remain zero. `hop_normalization=
-"frobenius"` is a named experimental alternative over both token and feature
-axes, not the manuscript equation.
+The default normalization axis is each token's feature axis. The additive
+epsilon means norm preservation is approximate at small norms; zero vectors
+remain zero. `hop_normalization="frobenius"` instead uses token and feature axes.
 
-The full renormalized output retains whichever tap projections are configured.
-To implement equations 1 and 6–8 without additional per-hop projections, use
+For learned Q/K/V, scalar value-only taps and square-root score scaling, select
 `projection="qkv"`, `qkv_bias=false`, `filter_projection="none"`,
-`score_scaling="sqrt_dim"`, and `hop_normalization="feature"`. The supplied
-`paper-renormalized-eeg` preset makes this distinction explicit; it is not the
-historical experiment. Z here denotes a head's weighted sum before the shared
-multi-head output projection. No manuscript file was edited.
+`score_scaling="sqrt_dim"` and `hop_normalization="feature"`. The
+`paper-renormalized-eeg` preset explicitly selects this alternative. Renormalized
+propagation is data-dependent and is not the same linear polynomial operator as
+ordinary powers of A. Here Z denotes a head's weighted sum before the shared
+multi-head output projection.
 
 ## Graph stages and controlled ablations
 
 Similarity calculation, scaling, selection, normalization, and propagation are
 separate functions. `top_k` accepts `"scheduled"`, a positive integer, a floating
 retention ratio in `(0,1]`, or JSON `null` for no sparsification. Counts/ratios are
-bounded to the token count; ratios use the historical floor convention.
+bounded to the token count; ratios use the floor convention.
 
 `top_k_stage` accepts `"raw_scores"`, `"scores"`, or `"softmax"`. Softmax and
 positive row-wise scaling preserve score order in exact arithmetic. Before/after
@@ -136,10 +111,10 @@ denominator floor representable and avoids overflow of half-precision degrees.
 Unnormalized signed operators can amplify high powers; nonfinite losses or
 unscaled gradients stop a run instead of producing publishable metrics.
 
-The historical dense similarity construction and dense propagation still have
+The dense similarity construction and dense propagation still have
 quadratic token dependence before/after masking. No sparse-complexity claim is
 made. `K=0` is a polynomial-order ablation, not a separately registered
-no-attention network. The no-attention model key has been removed as requested.
+no-attention network.
 
 ## Explicit input-dependent hop coefficients
 
@@ -147,10 +122,9 @@ no-attention network. The no-attention model key has been removed as requested.
 `alpha_base` per head, shared across tokens and trials. The explicit
 `trial_power` variant uses a zero-initialized linear map of normalized
 trial-wide log-power statistics to produce one bounded correction vector
-per trial. Its completed EEGNet comparison did not improve mean accuracy;
-see the [archived comparison](eegnet_agfl_conditioning.md).
+per trial. It is selected explicitly and recorded in the run configuration.
 
-The completed token-routing experiment selects `"token_contrast"`. With
+The `"token_contrast"` option uses token-dependent coefficients. With
 `P_0=V`, `P_1` from the configured propagation formula, and a head's token
 index `i`, it computes:
 
@@ -166,7 +140,7 @@ Both feature LayerNorms use epsilon `1e-5` and no affine parameters. The
 descriptor/gate arithmetic uses FP32 under autocast, preserving FP64 for
 reference calculations. `G` has shape `[K+1,2*d_h]`, no bias, and starts at
 zero without consuming random initialization draws. Its initial correction
-is zero. The four-head, eight-feature-per-head, `K=2` EEGNet study adds
+is zero. A four-head, eight-feature-per-head, `K=2` configuration adds
 `4 * 3 * 16 = 192` parameters. Graph construction, Top-k support and hop
 propagation are unchanged; the first propagated hop is reused by the gate.
 
@@ -183,58 +157,9 @@ For the value-only polynomial preset, the output is
 `A`, but token-dependent diagonal coefficients generally do not commute with
 `A`. It is therefore not one scalar-coefficient polynomial in `A`; a global
 spectral-filter interpretation or a theorem requiring shared coefficients
-does not transfer automatically. The manuscript's page-3 allowance for
-per-node/input-dependent coefficients motivates this explicit extension,
-but does not specify this exact controller or prove an accuracy improvement.
-
-Related work on adaptive propagation in
-[DAGNN](https://arxiv.org/abs/2007.09296) and node-wise channel mixing in
-[ACM](https://arxiv.org/abs/2210.07606) motivates adapting neighborhood use.
-These are conceptual references, not EEG accuracy evidence or claims that
-this implementation reproduces either method. The
-[fixed EEGNet experiment](eegnet_agfl_token_routing.md) retains the previous
-backbone, preprocessing and training recipe and measures static/token-routed
-AGFL against MHA and Linformer rank 4.
-
-### Token routing with local energy inputs
-
-Historical definition: this extension was removed from the active code after
-its unsuccessful study. Its [reproduction patch](archive/eegnet_energy_reproduction.patch)
-preserves the implementation; retained token routing above is unchanged.
-
-The opt-in `coefficient_conditioning="token_energy"` supplements the token
-descriptor `d_i` above with two scalar magnitude inputs per trial/head:
-
-```text
-E_i = mean_features(V_i^2)
-F_i = mean_features(P_1[i]^2)
-C_i = mean_features((P_1[i] - V_i)^2) / (2*(E_i + F_i) + epsilon)
-q_i = [tanh(log(E_i+epsilon) - mean_tokens(log(E+epsilon))),
-       C_i - mean_tokens(C)]
-r_i = tanh(G d_i + B q_i)
-delta_i = (s/2) * (r_i - mean_hops(r_i))
-```
-
-Here `epsilon=1e-6`; all token means are within a trial/head. The inequality
-`||x-y||^2 <= 2*(||x||^2+||y||^2)` bounds `C` in `[0,1]`, so the centered
-contrast input lies in `[-1,1]`. The energy input is bounded by tanh but is
-not necessarily zero-mean after tanh. Both describe latent value magnitudes,
-not physiological band-power estimates. Calculations promote FP16/BF16 to
-FP32 before subtraction/squaring and preserve FP64.
-
-`B` has shape `[K+1,2]`, no bias, and zero initialization without random draws.
-At `B=0` the original token controller is recovered for any `G`. This adds
-`4*3*2=24` weights in the fixed EEGNet study. The propagated features, graph,
-base coefficients, zero-sum hop correction and `s*K/(K+1)` per-hop bound are
-unchanged. No cross-trial statistics or labels enter the controller.
-
-This remains a token-dependent filter `sum_k diag(alpha_[:,k]) P_k`, with
-the same limits on scalar-polynomial spectral claims stated above. It is an
-explicit controller extension, not a formula or accuracy guarantee supplied
-by the manuscript. The [implementation and comparison guide](eegnet_agfl_token_energy.md)
-describes its ordinary-AdamW comparison against retained token AGFL, MHA and
-Linformer. The completed A03 study measured 84.81% for this extension versus
-85.19% for retained token routing; see the [results review](eegnet_a03_energy_review.md).
+does not transfer automatically. This explicit controller changes coefficient
+conditioning without adding graph hops or using labels. No accuracy gain is
+implied by its added representational capacity.
 
 ### Feature-wise token routing
 
@@ -253,9 +178,8 @@ H_i[f] = sum_{k=0..K} alpha_i[f,k] * Linear_k(P_k[i])[f]
 feature-major, then hop-major order. It starts at zero without random draws.
 The original token router is contained in this family: repeat its gate rows
 once per feature. That is a representational property, not a guarantee that
-optimization finds an equal or better solution. The actual preset starts
-from zero, with fresh training for every arm, rather than importing a selected
-checkpoint.
+optimization finds an equal or better solution. The controller starts from zero;
+its initialization and parameter budget are part of the selected configuration.
 
 The zero-sum constraint and `s*K/(K+1)` correction bound now hold separately
 for every token and feature. With four heads, eight features/head and `K=2`,
@@ -264,23 +188,18 @@ feature coordinates, not EEG channels or class-specific routes. No new hops,
 graphs, affine normalization or training-data access are introduced.
 
 For value-only polynomial hops the output is `sum_k C_k elementwise_mul (A^k V)`,
-where `C_k` has token and feature axes. This is an explicit extension beyond
-the manuscript's scalar coefficients. Shared-coefficient spectral statements
-cannot be reused without new assumptions/proofs. Related
-[AdaGNN](https://arxiv.org/abs/2104.12840) motivates allowing different feature
-channels to receive different filtering; this implementation is distinct.
-The historical temporal-graph A03 comparison measured 84.07% for feature routing versus
-85.19% for token routing, so added feature flexibility did not improve that
-experiment. See the [results review](eegnet_a03_feature_review.md) and
-[five-arm comparison and commands](eegnet_agfl_feature_routing.md).
+where `C_k` has token and feature axes. This extends the fixed scalar-coefficient
+polynomial.
+Shared-coefficient spectral statements cannot be reused without additional
+assumptions. These are learned feature coordinates, not physical channels.
 
 ## Comparable attention baselines
 
 ### Matched MHA output-gate control
 
-The current inter-channel EEG study uses the same `TokenOutputGate` class in
-MHA and augmented AGFL. Each gate acts on an electrode message; `B_h=0` and
-no temporal-bias parameters are constructed for EEG. The optional
+MHA and AGFL can use the same optional `TokenOutputGate` class. Each gate acts
+on an electrode message; `B_h=0` and no temporal-bias parameters are constructed
+for EEG. The optional
 `RelativeTemporalBias` below applies only to ECG time tokens and historical
 EEG time-token checkpoint replay. For each head, with temporal relative offset
 `r_ij = (j-i)/max(N-1,1)` where applicable:
@@ -305,10 +224,11 @@ adds another 12 weights, giving 80 for the combined temporal variant.
 Plain MHA retains its previous parameter names and formula when both flags
 are false. Temporal bias requires ordered time tokens.
 
-AGFL retains its sparse graph, token-dependent polynomial coefficients and
-multi-hop mixture; its output gate multiplies that mixture, while MHA's gate
-multiplies the single-hop message. MHA receives neither AGFL's sparsification
-nor its hop router. These differences are explicit parts of the comparison.
+AGFL retains its configured graph, hop coefficients and multi-hop mixture;
+its output gate multiplies that mixture, while MHA's gate multiplies the
+single-hop message. Coefficient conditioning and sparsification remain separate
+AGFL settings. MHA receives neither AGFL's sparsification nor its hop router.
+These differences are explicit parts of the comparison.
 For the temporal variant, the signed lag bias is softmax-equivalent to a source-position ramp, as in
 the AGFL version; it does not create an independently expressive directional
 interaction. No causal mask is introduced in either mechanism.

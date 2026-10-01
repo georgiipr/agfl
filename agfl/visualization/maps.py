@@ -42,6 +42,19 @@ def mixer_map(mixer, inputs, max_tokens=256):
     return mixer.mix(q, k, identity), 'Nystrom effective value-mixing weights (may be signed)'
 
 
+def per_trial_maps(maps, trials):
+    """Average trial-major per-time-step maps back to one [B,H,N,N] map per trial.
+
+    EEGNet ``pre_spatial`` presents one electrode set per time step, so the
+    attention batch axis is trials x time steps with row ``b * T + t``. Maps
+    whose row count is not a multiple of ``trials`` are returned unchanged.
+    """
+    count = maps.shape[0]
+    if trials < 1 or count == trials or count % trials:
+        return maps
+    return maps.reshape(trials, count // trials, *maps.shape[1:]).mean(1)
+
+
 def map_statistics(maps, tolerance=1e-8):
     """Entropy only exists here for nonnegative, normalized, nonempty rows."""
     values = np.asarray(maps)
