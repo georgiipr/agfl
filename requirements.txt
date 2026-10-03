@@ -1,0 +1,2 @@
+# Canonical dependencies live in pyproject.toml. The project runs from its
+# folder with `python -m agfl_speech`; no installation is required.

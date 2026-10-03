@@ -1,0 +1,567 @@
+"""Shared training policy, inherited by model-owned experiment definitions."""
+from __future__ import annotations
+import copy
+import json
+import math
+from pathlib import Path
+import random
+import time
+import traceback
+import numpy as np
+import torch
+from torch import nn
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+from .config import comparison_identity, experiment_identity
+from .metrics import classification_metrics
+from .reproducibility import seed_everything, seed_worker, provenance
+from .storage import write_json, run_directory, reset_run_artifacts
+
+
+class ClassificationLoss(nn.Module):
+    def __init__(self, weights=None, kind='cross_entropy', gamma=2.0):
+        super().__init__()
+        self.register_buffer('weights', weights)
+        self.kind, self.gamma = kind, gamma
+
+    def forward(self, logits, targets):
+        # Class weights multiply focal loss; they must not change p_t.
+        ce = F.cross_entropy(logits, targets, reduction='none')
+        loss = ce if self.kind == 'cross_entropy' else (1 - torch.exp(-ce)).pow(self.gamma) * ce
+        if self.weights is not None:
+            loss = loss * self.weights[targets]
+        return loss.mean()
+
+
+class Partition(Dataset):
+    def __init__(self, bundle, indices, normalization=None, augmentation=None):
+        self.bundle, self.indices = bundle, list(indices)
+        self.normalization, self.augmentation = normalization, augmentation
+        self.recombine_segments = (augmentation or {}).get('recombine_segments', 0)
+        self.donor_pools = {}
+        if self.recombine_segments:
+            if self.recombine_segments > bundle.x.shape[-1]:
+                raise ValueError('Recombination needs at least one sample per segment')
+            # Pools contain only this Partition's indices, grouped by subject
+            # and class. Neither validation nor test can contribute a segment.
+            for i in self.indices:
+                self.donor_pools.setdefault((bundle.groups[i], int(bundle.y[i])), []).append(i)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        i = self.indices[index]
+        x = self.bundle.x[i].copy()
+        if self.recombine_segments and np.random.random() < self.augmentation['recombine_probability']:
+            pool = self.donor_pools[(self.bundle.groups[i], int(self.bundle.y[i]))]
+            edges = np.linspace(0, x.shape[-1], self.recombine_segments + 1, dtype=int)
+            for left, right in zip(edges[:-1], edges[1:]):
+                donor = int(np.random.choice(pool))
+                # The same donor supplies every channel of a segment, keeping
+                # its spatial pattern and original relative trial timing.
+                x[:, left:right] = self.bundle.x[donor, :, left:right]
+        if self.normalization:
+            x = (x - self.normalization['mean']) / self.normalization['std']
+        if self.augmentation:
+            options = self.augmentation
+            if options['shift']:
+                shift = int(np.random.randint(-options['shift'], options['shift'] + 1))
+                x = np.roll(x, shift, axis=-1)
+                if shift > 0:
+                    x[..., :shift] = 0
+                elif shift < 0:
+                    x[..., shift:] = 0
+            if options['scale']:
+                x *= np.random.uniform(1 - options['scale'], 1 + options['scale'])
+            if options['noise']:
+                x += np.random.normal(0, options['noise'], x.shape).astype(np.float32)
+        return torch.from_numpy(np.asarray(x, dtype=np.float32)), torch.tensor(self.bundle.y[i], dtype=torch.long)
+
+
+class CalibrationInputs(Dataset):
+    """Unaugmented training inputs only; labels are never accessed."""
+    def __init__(self, bundle, indices, normalization):
+        self.bundle, self.indices = bundle, list(indices)
+        self.normalization = normalization
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        x = self.bundle.x[self.indices[index]].copy()
+        if self.normalization is not None:
+            x = (x - self.normalization['mean']) / self.normalization['std']
+        return torch.from_numpy(np.asarray(x, dtype=np.float32))
+
+
+def make_loaders(bundle, split, config, seed, *, include_test=True):
+    from .datasets import validate_split
+    validate_split(bundle, split)
+    for name in ('train', 'validation', 'test'):
+        if not split[name]:
+            raise ValueError(f'Research experiments require a nonempty {name} partition')
+    normalization = None
+    if config['data'].get('normalization') == 'train_channel':
+        x = bundle.x[split['train']]
+        mean = x.mean(axis=(0, 2), dtype=np.float64)[:, None]
+        std = x.std(axis=(0, 2), dtype=np.float64)[:, None]
+        normalization = {'mean': mean.astype(np.float32), 'std': np.maximum(std, 1e-8).astype(np.float32)}
+    options = config['training']
+    if options['augmentation']['shift'] >= bundle.metadata['samples']:
+        raise ValueError('Augmentation shift must be shorter than the signal window')
+    loaders = {}
+    partitions = ('train', 'validation', 'test') if include_test else ('train', 'validation')
+    for offset, name in enumerate(partitions):
+        partition = Partition(bundle, split[name], normalization, options['augmentation'] if name == 'train' else None)
+        loaders[name] = DataLoader(
+            partition, batch_size=options['batch_size'], shuffle=name == 'train',
+            num_workers=options['num_workers'], worker_init_fn=seed_worker,
+            generator=torch.Generator().manual_seed(seed + offset),
+            pin_memory=config['device'].startswith('cuda'), drop_last=False)
+    if options.get('ema_decay', 0) > 0:
+        loaders['calibration'] = DataLoader(
+            CalibrationInputs(bundle, split['train'], normalization),
+            batch_size=options['batch_size'], shuffle=False, num_workers=0,
+            generator=torch.Generator().manual_seed(seed + 3),
+            pin_memory=config['device'].startswith('cuda'), drop_last=False)
+    return loaders, normalization
+
+
+class ExponentialMovingAverage:
+    """Average post-update parameters; buffers retain their defined semantics."""
+    def __init__(self, model, decay):
+        if type(decay) not in (int, float) or not math.isfinite(decay) or not 0 < decay < 1:
+            raise ValueError('EMA decay must be finite in (0, 1)')
+        # Deepcopy does not reinitialize layers or consume their random draws.
+        self.model = copy.deepcopy(model).eval().requires_grad_(False)
+        self.decay, self.updates = float(decay), 0
+
+    @torch.no_grad()
+    def update(self, model):
+        for averaged, current in zip(self.model.parameters(), model.parameters(), strict=True):
+            averaged.lerp_(current.detach(), 1 - self.decay)
+        # Running variances and integer counters are not parameter averages.
+        # BN buffers are subsequently recalibrated; other buffers (positions,
+        # fixed random features, etc.) must preserve their source meaning.
+        for averaged, current in zip(self.model.buffers(), model.buffers(), strict=True):
+            averaged.copy_(current)
+        self.updates += 1
+
+
+@torch.no_grad()
+def calibrate_batch_norm(model, loader, device):
+    """Recompute BN statistics from every unaugmented training input.
+
+    Statistics are sample-weighted averages of batch statistics, including the
+    partial last batch, not a claim of exact pooled population variance. The
+    forward pass keeps dropout disabled. Training state and RNG are restored.
+    """
+    layers = [layer for layer in model.modules()
+              if isinstance(layer, nn.modules.batchnorm._BatchNorm) and layer.track_running_stats]
+    metadata = {'partition': 'train', 'samples': 0, 'batches': 0,
+                'batch_norm_layers': len(layers), 'method': 'sample_weighted_batch_statistics',
+                'augmentation': False, 'dropout': False}
+    if not layers:
+        return metadata
+    modes = {layer: layer.training for layer in model.modules()}
+    momenta = {layer: layer.momentum for layer in layers}
+    python_state, numpy_state = random.getstate(), np.random.get_state()
+    cuda_devices = ([device.index if device.index is not None else torch.cuda.current_device()]
+                    if device.type == 'cuda' else [])
+    try:
+        with torch.random.fork_rng(devices=cuda_devices):
+            model.eval()
+            for layer in layers:
+                layer.reset_running_stats()
+                layer.train()
+            for x in loader:
+                count = len(x)
+                for layer in layers:
+                    layer.momentum = count / (metadata['samples'] + count)
+                model(x.to(device))
+                metadata['samples'] += count
+                metadata['batches'] += 1
+            if metadata['samples'] != len(loader.dataset) or not metadata['samples']:
+                raise ValueError('BatchNorm calibration must include every training sample')
+    finally:
+        for layer, momentum in momenta.items():
+            layer.momentum = momentum
+        for layer, mode in modes.items():
+            layer.training = mode
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+    return metadata
+
+
+def checkpoint_is_better(metrics, best_metrics, criterion, tiebreaker='none'):
+    """Compare held-out validation metrics without consulting test data."""
+    if tiebreaker not in {'none', 'f1_loss'}:
+        raise ValueError('Unknown checkpoint tiebreaker')
+    if tiebreaker == 'f1_loss' and criterion != 'accuracy':
+        raise ValueError('f1_loss tiebreaker requires accuracy selection')
+
+    def key(values):
+        names = [criterion] + (['f1', 'loss'] if tiebreaker == 'f1_loss' else [])
+        for name in names:
+            value = values.get(name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f'Checkpoint metric {name} is undefined on validation data')
+        score = -values[criterion] if criterion == 'loss' else values[criterion]
+        return ((score, values['f1'], -values['loss']) if tiebreaker == 'f1_loss' else (score,))
+
+    current_key = key(metrics)
+    return best_metrics is None or current_key > key(best_metrics)
+
+
+def make_optimizer(model, options):
+    kwargs = {'lr': options['learning_rate'], 'weight_decay': options['weight_decay']}
+    factories = {'adamw': torch.optim.AdamW, 'adam': torch.optim.Adam, 'sgd': torch.optim.SGD}
+    if options['optimizer'] == 'sgd':
+        kwargs['momentum'] = options['momentum']
+    return factories[options['optimizer']](model.parameters(), **kwargs)
+
+
+def gradients_are_finite(parameters):
+    """Check a single-device model, transferring only one final flag to Python.
+
+    Converting each parameter's flag to bool separately synchronizes CUDA once
+    per gradient tensor. Reduce the flags on the model's device first instead.
+    Parameters without gradients (including frozen parameters) are ignored.
+    """
+    flags = [torch.isfinite(parameter.grad).all()
+             for parameter in parameters if parameter.grad is not None]
+    return not flags or bool(torch.stack(flags).all())
+
+
+def make_scheduler(optimizer, options):
+    if options['scheduler'] == 'none':
+        return None
+    if options['scheduler'] == 'plateau':
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5)
+    epochs = options['epochs']
+    warmup = min(options['warmup_epochs'], max(0, epochs - 1)) if options['scheduler'] == 'warmup_cosine' else 0
+    minimum = options['min_lr_ratio']
+    def factor(epoch):
+        if warmup and epoch < warmup:
+            return 0.1 + 0.9 * epoch / warmup
+        progress = min(1., (epoch - warmup) / max(1, epochs - warmup))
+        return minimum + (1 - minimum) * (1 + math.cos(math.pi * progress)) / 2
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def evaluate(model, loader, device, loss_fn=None):
+    model.eval()
+    probabilities, targets, total_loss, total = [], [], 0., 0
+    with torch.no_grad():
+        for x, y in loader:
+            logits = model(x.to(device))
+            if logits.ndim != 2 or logits.shape[0] != len(y):
+                raise ValueError('Model must return unnormalized [batch, classes] logits')
+            probabilities.append(logits.float().softmax(-1).cpu().numpy())
+            targets.append(y.numpy())
+            if loss_fn is not None:
+                loss = float(loss_fn(logits, y.to(device)))
+                if not math.isfinite(loss):
+                    raise FloatingPointError('Nonfinite held-out loss')
+                total_loss += loss * len(y)
+            total += len(y)
+    probabilities, targets = np.concatenate(probabilities), np.concatenate(targets)
+    metrics = classification_metrics(targets, probabilities)
+    metrics['loss'] = total_loss / total if loss_fn is not None else None
+    return metrics, targets, probabilities
+
+
+def run_training(config, bundle, split, run_dir, *, validation_only=False):
+    from .models import get_model_spec
+    from .session import find_session, mirror_run
+    run_dir = Path(run_dir)
+    save_checkpoints = config['training'].get('save_checkpoints', True)
+    if validation_only and not save_checkpoints:
+        raise ValueError('Validation-only searches need training.save_checkpoints=true for later evaluation')
+    session = find_session(run_dir)
+    seed = config['seeds'][0]
+    if config.get('subject_id') is not None and set(bundle.groups) != {config['subject_id']}:
+        raise ValueError('An individual-subject experiment cannot contain another subject')
+    seed_everything(seed, config['deterministic'], config['threads'])
+    device = torch.device(config['device'])
+    if device.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA requested but unavailable')
+    if config['training']['amp'] and device.type != 'cuda':
+        raise ValueError('AMP is supported only for CUDA experiments')
+    spec = get_model_spec(config['model'])
+    model = spec.build(config['model_options'], bundle.metadata, config['attention'], config['attention_options']).to(device)
+    loaders, normalization = make_loaders(bundle, split, config, seed, include_test=not validation_only)
+    options = config['training']
+    counts = np.bincount(bundle.y[split['train']], minlength=bundle.metadata['num_classes'])
+    if np.any(counts == 0):
+        raise ValueError(f'Training split lacks classes: {counts.tolist()}')
+    weights = None
+    if options['class_weights'] == 'balanced':
+        weights = torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32, device=device)
+    loss_fn = ClassificationLoss(weights, options['loss'], options['focal_gamma'])
+    optimizer = make_optimizer(model, options)
+    scheduler = make_scheduler(optimizer, options)
+    scaler = torch.amp.GradScaler('cuda', enabled=options['amp'])
+    ema = ExponentialMovingAverage(model, options['ema_decay']) if options.get('ema_decay', 0) else None
+    history, best_metrics, best_epoch, best_policy = [], None, None, None
+    best_checkpoint = None
+    criterion = options['checkpoint_criterion']
+    tiebreaker = options.get('checkpoint_tiebreaker', 'none')
+    # The fingerprint re-hashes every signal; compute it once for all checkpoints.
+    fingerprint = bundle.fingerprint
+    started = time.monotonic()
+    description = f"{config['dataset']}/{config['model']}/{config['attention']} {config.get('subject_id') or 'cohort'} seed={seed}"
+    with tqdm(range(1, options['epochs'] + 1), desc=description, unit='epoch',
+              dynamic_ncols=True, mininterval=1.0, disable=None) as progress:
+        for epoch in progress:
+            model.train()
+            loss_total, n, skipped_steps, correct = 0., 0, 0, 0
+            learning_rate = optimizer.param_groups[0]['lr']
+            for x, y in loaders['train']:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type=device.type, enabled=options['amp'], dtype=torch.float16):
+                    logits = model(x)
+                    loss = loss_fn(logits, y)
+                correct += int((logits.detach().argmax(-1) == y).sum())
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f'Nonfinite training loss at epoch {epoch}')
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if options['gradient_clip'] is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), options['gradient_clip'], error_if_nonfinite=not options['amp'])
+                elif not options['amp'] and not gradients_are_finite(model.parameters()):
+                    raise FloatingPointError('Nonfinite gradient')
+                previous_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                skipped_step = scaler.get_scale() < previous_scale
+                skipped_steps += int(skipped_step)
+                if hasattr(model, 'clip_weights'):
+                    model.clip_weights()
+                if ema is not None and not skipped_step:
+                    ema.update(model)
+                loss_total += float(loss.detach()) * len(y)
+                n += len(y)
+            evaluated_model = ema.model if ema is not None else model
+            calibration = (calibrate_batch_norm(evaluated_model, loaders['calibration'], device)
+                           if ema is not None else None)
+            policy = {'weights': 'ema' if ema is not None else 'raw',
+                      'ema_decay': options.get('ema_decay', 0.0),
+                      'ema_updates': ema.updates if ema is not None else 0,
+                      'training_metrics_weights': 'raw',
+                      'batch_norm_calibration': calibration,
+                      'criterion': criterion, 'tiebreaker': tiebreaker}
+            validation, _, _ = spec.evaluate(evaluated_model, loaders['validation'], device, loss_fn)
+            better = checkpoint_is_better(validation, best_metrics, criterion, tiebreaker)
+            if better:
+                best_metrics, best_epoch, best_policy = copy.deepcopy(validation), epoch, copy.deepcopy(policy)
+                selected_checkpoint = {
+                    'model': {k: v.detach().cpu().clone() for k, v in evaluated_model.state_dict().items()},
+                    'epoch': epoch, 'validation': validation, 'config': config,
+                    'checkpoint_policy': policy,
+                    'split_id': split['split_id'], 'dataset_fingerprint': fingerprint,
+                    'normalization': normalization}
+                if save_checkpoints:
+                    torch.save(selected_checkpoint, run_dir / 'checkpoint.pt')
+                else:
+                    # Preserve the selected epoch independently of live model
+                    # weights, without writing any checkpoint file to disk.
+                    best_checkpoint = selected_checkpoint
+                del selected_checkpoint
+            history.append({'epoch': epoch, 'train_loss': loss_total / n, 'train_accuracy': correct / n,
+                            'validation': validation, 'learning_rate': learning_rate,
+                            'amp_skipped_steps': skipped_steps, 'checkpoint_policy': policy})
+            if scheduler is not None:
+                scheduler.step(validation['loss']) if options['scheduler'] == 'plateau' else scheduler.step()
+            write_json(run_dir / 'history.json', history)
+            if session is not None:
+                mirror_run(session.root, run_dir, names=('history.json',))
+            progress.set_postfix(loss=f'{loss_total / n:.4f}', train_acc=f'{correct / n:.1%}',
+                                 val_acc=f"{validation['accuracy']:.1%}", refresh=False)
+            patience = options.get('early_stopping_patience', 0)
+            if (patience and epoch >= options.get('early_stopping_min_epochs', 0)
+                    and epoch - best_epoch >= patience):
+                break
+    if validation_only:
+        # Candidate selection artifacts deliberately have no result.json and no
+        # test metrics. Standard analyze therefore cannot rank/test candidates.
+        selected = {
+            'status': 'validation_completed', 'config': config,
+            'seed': seed, 'subject_id': config.get('subject_id'),
+            'validation': history[best_epoch - 1]['validation'],
+            'best_checkpoint_epoch': best_epoch, 'epochs_trained': len(history),
+            'checkpoint_policy': best_policy,
+            'elapsed_seconds': time.monotonic() - started,
+            'experiment_id': experiment_identity(config), 'split_id': split['split_id'],
+            'parameter_count': sum(p.numel() for p in model.parameters()),
+        }
+        write_json(run_dir / 'selection.json', selected)
+        return selected
+    evaluation_options = {'elapsed_seconds': time.monotonic() - started, 'model': model}
+    if not save_checkpoints:
+        if best_checkpoint is None:
+            raise RuntimeError('Training did not select a validation checkpoint')
+        evaluation_options['checkpoint'] = best_checkpoint
+    return evaluate_saved_checkpoint(config, bundle, split, run_dir, **evaluation_options)
+
+
+def evaluate_saved_checkpoint(config, bundle, split, run_dir, *, elapsed_seconds=0., model=None, checkpoint=None):
+    """Evaluate selected weights from disk or an independent in-memory snapshot."""
+    from .models import get_model_spec
+    started = time.monotonic()
+    run_dir = Path(run_dir)
+    seed, options = config['seeds'][0], config['training']
+    device = torch.device(config['device'])
+    spec = get_model_spec(config['model'])
+    seed_everything(seed, config['deterministic'], config['threads'])
+    if model is None:
+        model = spec.rebuild_saved(config['model_options'], bundle.metadata, config['attention'], config['attention_options']).to(device)
+    loaders, normalization = make_loaders(bundle, split, config, seed)
+    counts = np.bincount(bundle.y[split['train']], minlength=bundle.metadata['num_classes'])
+    weights = (torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32, device=device)
+               if options['class_weights'] == 'balanced' else None)
+    loss_fn = ClassificationLoss(weights, options['loss'], options['focal_gamma'])
+    if checkpoint is None:
+        if not options.get('save_checkpoints', True):
+            raise ValueError('This run did not retain a checkpoint; its selected weights must be supplied in memory')
+        checkpoint = torch.load(run_dir / 'checkpoint.pt', map_location='cpu', weights_only=False)
+    if (checkpoint['config'] != config or checkpoint['split_id'] != split['split_id']
+            or checkpoint['dataset_fingerprint'] != bundle.fingerprint):
+        raise ValueError('Selected checkpoint does not match its configuration, data and split')
+    if (normalization is None) != (checkpoint['normalization'] is None):
+        raise ValueError('Selected checkpoint normalization differs from its training split')
+    for key in ('mean', 'std'):
+        if normalization is not None and not np.array_equal(checkpoint['normalization'][key], normalization[key]):
+            raise ValueError('Selected checkpoint normalization differs from its training split')
+    model.load_state_dict(checkpoint['model'])
+    model.to(device)
+    validation, val_y, val_prob = spec.evaluate(model, loaders['validation'], device, loss_fn)
+    # First and only test evaluation. Test outputs never select a checkpoint.
+    test, test_y, test_prob = spec.evaluate(model, loaders['test'], device, loss_fn)
+    test_groups = bundle.groups[split['test']]
+    group_metrics = {str(group): classification_metrics(test_y[test_groups == group], test_prob[test_groups == group])
+                     for group in sorted(set(test_groups))}
+    np.savez_compressed(run_dir / 'predictions.npz', validation_targets=val_y, validation_probabilities=val_prob,
+                        test_targets=test_y, test_probabilities=test_prob,
+                        validation_ids=np.asarray(bundle.sample_ids)[split['validation']],
+                        test_ids=np.asarray(bundle.sample_ids)[split['test']])
+    result = {
+        'schema_version': 2, 'status': 'completed', 'dataset': config['dataset'],
+        'model': config['model'], 'attention': config['attention'], 'model_variant': config['model_variant'], 'seed': seed,
+        'subject_id': config.get('subject_id'),
+        'split_id': split['split_id'], 'dataset_fingerprint': bundle.fingerprint,
+        'parameter_count': sum(p.numel() for p in model.parameters()),
+        'trainable_parameter_count': sum(p.numel() for p in model.parameters() if p.requires_grad),
+        'best_checkpoint_epoch': checkpoint['epoch'], 'validation': validation, 'test': test,
+        'checkpoint_policy': checkpoint.get('checkpoint_policy', {'weights': 'raw'}),
+        'checkpoint_retained': options.get('save_checkpoints', True),
+        'epochs_trained': len(json.loads((run_dir / 'history.json').read_text())),
+        'test_by_subject': group_metrics,
+        'training_class_counts': counts.tolist(), 'class_weights': None if weights is None else weights.cpu().tolist(),
+        'elapsed_seconds': elapsed_seconds + time.monotonic() - started, 'config': config,
+        'experiment_id': experiment_identity(config), 'comparison_id': comparison_identity(config),
+        'token_axis': model.token_axis,
+        'node_labels': bundle.metadata.get('channel_names') if model.token_axis == 'electrode' else None,
+        'num_tokens': getattr(model, 'num_tokens', None),
+        'attention_modules': [{'name': name, 'attention': module.attention_key,
+                               'num_tokens': module.num_tokens, 'token_axis': module.token_axis}
+                              for name, module in model.named_modules() if getattr(module, 'is_attention', False)]}
+    write_json(run_dir / 'result.json', result)
+    return result
+
+
+def completed_run(run_dir, config):
+    """Only fully written, matching runs are eligible for --skip-completed."""
+    required = ('result.json', 'config.json', 'split.json', 'history.json', 'predictions.npz')
+    if config['training'].get('save_checkpoints', True):
+        required += ('checkpoint.pt',)
+    if not all((run_dir / name).is_file() for name in required):
+        return None
+    if (run_dir / 'failure.json').exists():
+        return None
+    try:
+        previous = json.loads((run_dir / 'result.json').read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(previous, dict):
+        return None
+    expected = {
+        'status': 'completed', 'seed': config['seeds'][0],
+        'model': config['model'], 'attention': config['attention'], 'dataset': config['dataset'],
+        'split_id': config['expected_split_id'], 'dataset_fingerprint': config['dataset_fingerprint'],
+        'experiment_id': experiment_identity(config), 'comparison_id': comparison_identity(config),
+    }
+    return previous if all(previous.get(key) == value for key, value in expected.items()) else None
+
+
+def run_experiment(config, skip_completed=False):
+    from .config import resolve_experiments
+    results = []
+    for experiment in resolve_experiments(config):
+        results.extend(_run_experiment(experiment, skip_completed))
+    return results
+
+
+def _run_experiment(config, skip_completed=False):
+    from .config import resolve_config
+    from .session import session_paths, session_activity
+    config = resolve_config(config)
+    session = session_paths(config['output_dir'], create=True)
+    with session_activity(session.root):
+        return _run_session_experiment(config, session, skip_completed)
+
+
+def _run_session_experiment(config, session, skip_completed):
+    from .models import get_model_spec
+    from .session import mirror_run
+    spec = get_model_spec(config['model'])
+    seed_everything(config['seeds'][0], config['deterministic'], config['threads'])
+    current_provenance = provenance()
+    expected_provenance = config.get('provenance')
+    if expected_provenance and (expected_provenance['source_sha256'] != current_provenance['source_sha256']
+                                or expected_provenance['packages'] != current_provenance['packages']):
+        raise ValueError('Saved configuration requires its recorded source and package versions; use a fresh experiment config to change implementation')
+    results, bundle = [], None
+    for seed in config['seeds']:
+        seed_everything(seed, config['deterministic'], config['threads'])
+        if bundle is None:
+            bundle, split = spec.prepare_data(config, seed)
+        else:
+            from .datasets import get_split
+            split = get_split(bundle, config['split'], seed, config['split_dir'])
+        if config.get('dataset_fingerprint') not in (None, bundle.fingerprint):
+            raise ValueError('Dataset bytes/preprocessing differ from the saved configuration')
+        if config.get('expected_split_id') not in (None, split['split_id']):
+            raise ValueError('Generated split differs from the saved configuration')
+        resolved = copy.deepcopy(config)
+        resolved.update(seeds=[seed], dataset_fingerprint=bundle.fingerprint,
+                        expected_split_id=split['split_id'], resolved_metadata=bundle.metadata,
+                        provenance=current_provenance)
+        output = session.artifacts / config['dataset']
+        if config.get('subject_id'):
+            output = output / f"subject_{config['subject_id']}"
+        run_dir = output / f"{config['model']}-{config['attention']}-{experiment_identity(resolved)}" / f'seed_{seed}'
+        with run_directory(run_dir):
+            previous = completed_run(run_dir, resolved) if skip_completed else None
+            if previous is not None:
+                mirror_run(session.root, run_dir)
+                results.append(previous)
+                continue
+            if (run_dir / 'config.json').exists():
+                print(f'Restarting {run_dir} from epoch 1; replacing previous run artifacts', flush=True)
+            reset_run_artifacts(run_dir)
+            write_json(run_dir / 'config.json', resolved)
+            write_json(run_dir / 'split.json', split)
+            mirror_run(session.root, run_dir)
+            try:
+                results.append(spec.run(resolved, bundle, split, run_dir))
+            except (Exception, KeyboardInterrupt) as error:
+                write_json(run_dir / 'failure.json', {'type': type(error).__name__, 'message': str(error),
+                                                       'traceback': traceback.format_exc()})
+                raise
+            finally:
+                mirror_run(session.root, run_dir)
+    return results

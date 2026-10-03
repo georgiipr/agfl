@@ -1,0 +1,23 @@
+{
+  "dataset": "si_hom",
+  "model": "eegnet",
+  "attention": "agfl",
+  "device": "cuda",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "split": {
+    "protocol": "stratified",
+    "train": 0.6,
+    "validation": 0.2,
+    "test": 0.2
+  },
+  "training": {
+    "epochs": 200
+  },
+  "output_dir": "results/si-hom"
+}

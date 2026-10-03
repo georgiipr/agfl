@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agfl-speech"
+version = "0.1.0"
+description = "AGFL and baseline electrode attention on SI_Hom imagined-speech EEG"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.5,<3",
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+    "scikit-learn>=1.4,<2",
+    "mne>=1.6,<2",
+    "tqdm>=4.66,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+plots = ["matplotlib>=3.8,<4"]
+umap = ["umap-learn>=0.5,<1"]
+# Only for rebuilding the trial archive from the authors' MATLAB files.
+prepare = ["h5py>=3.8,<4"]
+
+[project.scripts]
+agfl-speech = "agfl_speech.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agfl_speech*"]
+
+[tool.setuptools.package-data]
+"agfl_speech.presets" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
